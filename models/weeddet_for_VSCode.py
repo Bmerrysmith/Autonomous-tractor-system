@@ -559,9 +559,8 @@ class WeedDataset(Dataset):
         train.txt      ← image stems, one per line
         val.txt
 
-    NOTE: If training in Colab/Kaggle with COCO JSON source data,
-    use FixedWeedDataset (in colab_training_cell.py) to apply
-    bounding box coordinate scaling. Without it, loss → 0.0000.
+    Bounding box coordinates are rescaled in __getitem__ to match the
+    resized image dimensions. Do NOT apply additional scaling externally.
     """
 
     CLASS_NAMES = ['Rice']

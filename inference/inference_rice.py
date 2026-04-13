@@ -39,9 +39,30 @@ RICE_THRESH  = 0.5
 # ── Model loading ────────────────────────────────────────────────────────────
 
 def load_model(checkpoint_path, device='cuda'):
-    if '/content' not in sys.path:
-        sys.path.insert(0, '/content')
-    import weeddet_for_VSCode as wd
+    # Try multiple import strategies for weeddet_for_VSCode
+    wd = None
+    # 1. Direct import (if installed or on PYTHONPATH)
+    try:
+        import weeddet_for_VSCode as wd
+    except ImportError:
+        pass
+    # 2. Colab convention
+    if wd is None:
+        for search_dir in ['/content', os.path.dirname(__file__),
+                           os.path.join(os.path.dirname(__file__), '..', 'models')]:
+            search_dir = os.path.abspath(search_dir)
+            if search_dir not in sys.path:
+                sys.path.insert(0, search_dir)
+            try:
+                import weeddet_for_VSCode as wd
+                break
+            except ImportError:
+                continue
+    if wd is None:
+        raise ImportError(
+            "Cannot find weeddet_for_VSCode.py. Place it in /content/, "
+            "the models/ directory, or add its location to PYTHONPATH."
+        )
 
     ckpt  = torch.load(checkpoint_path, map_location=device)
     cfg   = ckpt.get('config', {})
