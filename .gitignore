@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+research/__pycache__/
+research_outputs/

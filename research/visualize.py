@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch, Rectangle
+from matplotlib.patches import FancyBboxPatch
 import numpy as np
 
 try:
@@ -242,3 +242,55 @@ def plot_system_overview(output_dir: Path) -> Path:
     )
 
     return _finalize(fig, output_dir / "system_overview.png", "System Overview")
+
+
+def plot_training_curves(history: dict[str, list[float]], output_dir: Path) -> Path:
+    set_style()
+    fig, ax = plt.subplots(figsize=(10.8, 5.4))
+
+    epochs = np.arange(1, len(history["train_loss"]) + 1)
+    ax.plot(epochs, history["train_loss"], color="#79d7ff", linewidth=2.0, label="Train loss")
+    ax.plot(epochs, history["val_loss"], color="#ff8a80", linewidth=2.0, label="Validation loss")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("MSE")
+    ax.set_title("Lane model training convergence")
+    ax.legend(loc="upper right")
+
+    return _finalize(fig, output_dir / "model_training_curves.png", "Model Training Curves")
+
+
+def plot_prediction_scatter(y_true: np.ndarray, y_pred: np.ndarray, target_names: list[str], output_dir: Path) -> Path:
+    set_style()
+    n_targets = y_true.shape[1]
+    fig, axes = plt.subplots(1, n_targets, figsize=(4.8 * n_targets, 4.6))
+    axes = np.atleast_1d(axes)
+
+    for i, ax in enumerate(axes):
+        t = y_true[:, i]
+        p = y_pred[:, i]
+        lo = min(t.min(), p.min())
+        hi = max(t.max(), p.max())
+        ax.scatter(t, p, s=9, alpha=0.45, color="#79d7ff", edgecolors="none")
+        ax.plot([lo, hi], [lo, hi], color="#f4e285", linewidth=1.8, linestyle="--")
+        ax.set_xlabel("True")
+        ax.set_ylabel("Pred")
+        ax.set_title(target_names[i])
+
+    return _finalize(fig, output_dir / "model_prediction_scatter.png", "Prediction Scatter")
+
+
+def plot_error_histograms(y_true: np.ndarray, y_pred: np.ndarray, target_names: list[str], output_dir: Path) -> Path:
+    set_style()
+    errors = y_pred - y_true
+    n_targets = errors.shape[1]
+    fig, axes = plt.subplots(1, n_targets, figsize=(4.8 * n_targets, 4.6))
+    axes = np.atleast_1d(axes)
+
+    for i, ax in enumerate(axes):
+        ax.hist(errors[:, i], bins=36, color="#58d68d", alpha=0.85)
+        ax.axvline(0.0, color="#f4e285", linewidth=1.7, linestyle="--")
+        ax.set_xlabel("Prediction error")
+        ax.set_ylabel("Count")
+        ax.set_title(target_names[i])
+
+    return _finalize(fig, output_dir / "model_error_histograms.png", "Prediction Error Histograms")

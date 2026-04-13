@@ -53,6 +53,14 @@ class PlanningTradeoffSample:
     response_time_ms: np.ndarray
 
 
+@dataclass(frozen=True)
+class SupervisedLaneDataset:
+    features: np.ndarray
+    targets: np.ndarray
+    feature_names: list[str]
+    target_names: list[str]
+
+
 def generate_row_geometry_sample(num_points: int = 120, seed: int = 7) -> RowGeometrySample:
     rng = np.random.default_rng(seed)
     x = np.linspace(0.0, 25.0, num_points)
@@ -156,3 +164,76 @@ def generate_sensor_fusion_signal(sample: LocalizationSample) -> Dict[str, np.nd
         "corroboration": corroboration,
         "fused": fused,
     }
+
+
+def generate_supervised_lane_dataset(num_samples: int = 7000, seed: int = 23) -> SupervisedLaneDataset:
+    """Create a supervised dataset for a standalone lane/localization model.
+
+    Features emulate LiDAR geometry + GNSS/IMU behavior.
+    Targets emulate row center offset, row width, and heading error.
+    """
+
+    rng = np.random.default_rng(seed)
+
+    lidar_left = rng.uniform(1.0, 2.2, num_samples)
+    lidar_right = rng.uniform(1.0, 2.2, num_samples)
+    imu_yaw_rate = rng.normal(0.0, 0.35, num_samples)
+    gnss_x_noise = rng.normal(0.0, 0.9, num_samples)
+    gnss_y_noise = rng.normal(0.0, 0.7, num_samples)
+    speed = rng.uniform(0.4, 2.8, num_samples)
+    slip_ratio = rng.uniform(0.0, 0.3, num_samples)
+    scan_density = rng.uniform(0.45, 1.0, num_samples)
+
+    features = np.column_stack(
+        [
+            lidar_left,
+            lidar_right,
+            imu_yaw_rate,
+            gnss_x_noise,
+            gnss_y_noise,
+            speed,
+            slip_ratio,
+            scan_density,
+        ]
+    )
+
+    corridor_width = lidar_left + lidar_right
+    offset = (
+        0.32 * (lidar_right - lidar_left)
+        + 0.18 * np.tanh(imu_yaw_rate * 2.0)
+        + 0.09 * np.sin(speed * 1.4)
+        - 0.12 * slip_ratio
+        + 0.04 * gnss_y_noise
+        + 0.03 * rng.normal(size=num_samples)
+    )
+    width_target = (
+        corridor_width
+        + 0.25 * np.sin(scan_density * np.pi)
+        - 0.1 * slip_ratio
+        + 0.02 * rng.normal(size=num_samples)
+    )
+    heading_error = (
+        0.75 * np.arctan2(imu_yaw_rate, speed + 1e-6)
+        + 0.08 * gnss_x_noise
+        - 0.07 * gnss_y_noise
+        + 0.1 * (0.7 - scan_density)
+        + 0.02 * rng.normal(size=num_samples)
+    )
+
+    targets = np.column_stack([offset, width_target, heading_error])
+
+    return SupervisedLaneDataset(
+        features=features.astype(np.float64),
+        targets=targets.astype(np.float64),
+        feature_names=[
+            "lidar_left",
+            "lidar_right",
+            "imu_yaw_rate",
+            "gnss_x_noise",
+            "gnss_y_noise",
+            "speed",
+            "slip_ratio",
+            "scan_density",
+        ],
+        target_names=["center_offset", "row_width", "heading_error"],
+    )
