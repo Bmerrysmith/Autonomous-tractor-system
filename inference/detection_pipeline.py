@@ -20,7 +20,7 @@ Detection fields (one per detected object)
 ──────────────────────────────────────────
   box           [x1, y1, x2, y2]  xyxy, original pixel coords
   score         float             model confidence 0-1
-  label         int               class index (0 = Rice)
+  label         int               class index (0=Rice, 1=Weed, 2=Obstacle)
   label_name    str               human-readable class name
 
 Usage
@@ -40,16 +40,31 @@ import sys
 import time
 import os
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
+import numpy as np
 import torch
 import torchvision.transforms as T
 
 # ── Constants matching WeedDet training config ────────────────────────────
-IMG_SIZE     = (600, 1000)   # (H, W) — must match training / inference_rice.py
-CLASS_NAMES  = ['Rice']
-RICE_CLASS   = 0
+IMG_SIZE      = (600, 1000)   # (H, W) — must match training / inference_rice.py
+CLASS_NAMES   = ['Rice', 'Weed', 'Obstacle']
+RICE_CLASS     = 0
+WEED_CLASS     = 1
+OBSTACLE_CLASS = 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SAFETY FLAG
+# ═══════════════════════════════════════════════════════════════════════════
+
+class SafetyFlag(Enum):
+    """Safety status returned by DetectionResult.evaluate_safety()."""
+    CLEAR            = "clear"
+    OBSTACLE_WARNING = "obstacle_warning"
+    ROW_LOST         = "row_lost"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -80,6 +95,12 @@ class Detection:
     def is_rice(self) -> bool:
         return self.label == RICE_CLASS
 
+    def is_weed(self) -> bool:
+        return self.label == WEED_CLASS
+
+    def is_obstacle(self) -> bool:
+        return self.label == OBSTACLE_CLASS
+
 
 @dataclass
 class DetectionResult:
@@ -101,8 +122,24 @@ class DetectionResult:
         return [d for d in self.detections if d.is_rice()]
 
     @property
+    def weed_detections(self) -> List[Detection]:
+        return [d for d in self.detections if d.is_weed()]
+
+    @property
+    def obstacle_detections(self) -> List[Detection]:
+        return [d for d in self.detections if d.is_obstacle()]
+
+    @property
     def rice_count(self) -> int:
         return len(self.rice_detections)
+
+    @property
+    def weed_count(self) -> int:
+        return len(self.weed_detections)
+
+    @property
+    def obstacle_count(self) -> int:
+        return len(self.obstacle_detections)
 
     @property
     def image_area(self) -> float:
@@ -116,6 +153,31 @@ class DetectionResult:
     def estimated_weed_pct(self) -> float:
         """Rough weed coverage (%) based on non-rice pixel area."""
         return max(0.0, (self.image_area - self.rice_area) / self.image_area * 100.0)
+
+    def evaluate_safety(self, consecutive_empty_frames: int = 0) -> SafetyFlag:
+        """
+        Evaluate the safety status of this detection frame.
+
+        Returns
+        -------
+        SafetyFlag.ROW_LOST
+            No rice detected and >= 3 consecutive empty frames — the
+            tractor has likely lost the crop row.
+        SafetyFlag.OBSTACLE_WARNING
+            Any single detection covers > 20 % of the image area,
+            indicating a large unexpected object (person, animal, etc.).
+        SafetyFlag.CLEAR
+            Normal operation.
+        """
+        if self.rice_count == 0 and consecutive_empty_frames >= 3:
+            return SafetyFlag.ROW_LOST
+
+        area_threshold = 0.20 * self.image_area
+        for det in self.detections:
+            if det.area > area_threshold:
+                return SafetyFlag.OBSTACLE_WARNING
+
+        return SafetyFlag.CLEAR
 
     def summary(self) -> str:
         return (
@@ -154,9 +216,13 @@ class DetectionPipeline:
         device: str = 'auto',
         threshold: float = 0.50,
         model_module_path: Optional[str] = None,
+        use_exgr: bool = False,
+        exgr_alpha: float = 0.30,
     ):
         self.checkpoint_path = checkpoint_path
         self.threshold = threshold
+        self.use_exgr = use_exgr
+        self.exgr_alpha = exgr_alpha
 
         # ── resolve device ──────────────────────────────────────────────
         if device == 'auto':
@@ -202,10 +268,47 @@ class DetectionPipeline:
 
     # ── preprocessing ────────────────────────────────────────────────────
 
+    @staticmethod
+    def _apply_exgr(img, alpha: float = 0.30):
+        """
+        Apply Excess Green minus Excess Red (ExGR) vegetation enhancement.
+
+        Technique from NCHU RiceSeedlingDataset preprocessing pipeline:
+            ExGR = 3G - 2.4R - B   (on normalised [0,1] values)
+
+        Positive ExGR values identify vegetated pixels (crops / weeds).
+        We boost each RGB channel by (1 + alpha * ExGR) so plant regions
+        gain contrast before WeedDet's forward pass without distorting
+        non-vegetation areas (ExGR <= 0 → no change).
+
+        Args:
+            img   : PIL Image in RGB mode
+            alpha : boost strength (default 0.30)
+
+        Returns:
+            PIL Image with vegetation-enhanced RGB channels
+        """
+        from PIL import Image as PILImage
+        arr = np.asarray(img, dtype=np.float32) / 255.0   # (H, W, 3)  [0,1]
+        R, G, B = arr[..., 0], arr[..., 1], arr[..., 2]
+
+        exgr = 3.0 * G - 2.4 * R - B                      # ExGR index
+        exgr = np.clip(exgr, 0.0, None)                   # keep vegetation only
+        # Normalise to [0, 1] so alpha has consistent strength across images
+        max_val = exgr.max()
+        if max_val > 0:
+            exgr = exgr / max_val
+
+        boost = 1.0 + alpha * exgr[..., np.newaxis]        # (H, W, 1) broadcast
+        enhanced = np.clip(arr * boost, 0.0, 1.0)
+        return PILImage.fromarray((enhanced * 255).astype(np.uint8))
+
     def _preprocess(self, image_path: str):
         from PIL import Image as PILImage
-        img          = PILImage.open(image_path).convert('RGB')
+        img = PILImage.open(image_path).convert('RGB')
         orig_w, orig_h = img.size
+        if self.use_exgr:
+            img = self._apply_exgr(img, alpha=self.exgr_alpha)
         tensor = self._transform(img).unsqueeze(0).to(self.device)
         return tensor, orig_w, orig_h
 

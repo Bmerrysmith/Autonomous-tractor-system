@@ -41,7 +41,8 @@ NozzleCommand fields
   x_start            int     left pixel column (original coords)
   x_end              int     right pixel column (original coords)
   spray              bool    True = open valve, False = close valve
-  reason             str     'weed_zone' | 'rice_protected' | 'no_detection'
+  reason             str     'weed_zone' | 'weed_confirmed' | 'rice_protected'
+                             | 'obstacle_blocked' | 'no_detection'
 
 SprayZone fields
 ────────────────
@@ -107,6 +108,8 @@ class SprayDecision:
     Feed nozzle_commands directly to the tractor's valve controller.
     """
     protected_boxes:   List['Detection']        # rice detections (HOLD)
+    weed_boxes:        List['Detection']        # explicit weed detections
+    obstacle_boxes:    List['Detection']        # obstacle detections (BLOCK)
     spray_zones:       List[SprayZone]          # regions to spray
     nozzle_commands:   List[NozzleCommand]      # per-sector valve states
     weed_coverage_pct: float                    # estimated % weed coverage
@@ -157,14 +160,19 @@ class DiscriminationModule:
         """
         Convert a DetectionResult into a SprayDecision.
 
-        This is the detection-to-discrimination handoff function.
-        Call it immediately after DetectionPipeline.run().
+        Class priority (highest → lowest):
+          1. Obstacle  — block the sector entirely (no spray, halt signal).
+          2. Rice      — protect the sector (no spray).
+          3. Weed      — spray confirmed.
+          4. No detection — spray (inverted-detection default).
         """
-        protected = [d for d in result.detections
-                     if d.is_rice() and d.score >= self.rice_veto_threshold]
+        protected  = [d for d in result.detections
+                      if d.is_rice() and d.score >= self.rice_veto_threshold]
+        weeds      = result.weed_detections
+        obstacles  = result.obstacle_detections
 
         nozzle_commands = self._build_nozzle_commands(
-            protected, result.orig_w, result.orig_h
+            protected, weeds, obstacles, result.orig_w, result.orig_h
         )
         spray_zones = self._build_spray_zones(
             nozzle_commands, result.orig_h
@@ -173,6 +181,8 @@ class DiscriminationModule:
         summary = (
             f"SprayDecision | "
             f"rice_protected={len(protected)} | "
+            f"weeds={len(weeds)} | "
+            f"obstacles={len(obstacles)} | "
             f"nozzles={self.num_nozzles} | "
             f"spray={sum(1 for c in nozzle_commands if c.spray)} | "
             f"hold={sum(1 for c in nozzle_commands if not c.spray)} | "
@@ -181,6 +191,8 @@ class DiscriminationModule:
 
         return SprayDecision(
             protected_boxes=protected,
+            weed_boxes=weeds,
+            obstacle_boxes=obstacles,
             spray_zones=spray_zones,
             nozzle_commands=nozzle_commands,
             weed_coverage_pct=result.estimated_weed_pct,
@@ -191,14 +203,20 @@ class DiscriminationModule:
 
     def _build_nozzle_commands(
         self,
-        protected: List['Detection'],
+        protected:  List['Detection'],
+        weeds:      List['Detection'],
+        obstacles:  List['Detection'],
         orig_w: int,
         orig_h: int,
     ) -> List[NozzleCommand]:
         """
-        Divide the image width into num_nozzles equal sectors.
-        Any sector that overlaps a rice protection box is held (no spray).
-        All other sectors spray.
+        Divide the image width into num_nozzles equal sectors and decide
+        each sector's spray state using the three-class priority:
+
+          obstacle overlap  → HOLD  ('obstacle_blocked')
+          rice overlap      → HOLD  ('rice_protected')
+          weed confirmed    → SPRAY ('weed_confirmed')  [explicit weed box]
+          no detection      → SPRAY ('weed_zone' / 'no_detection')
         """
         sector_w = orig_w / self.num_nozzles
         commands: List[NozzleCommand] = []
@@ -207,24 +225,35 @@ class DiscriminationModule:
             x_start = int(round(n * sector_w))
             x_end   = int(round((n + 1) * sector_w))
 
-            # Rice veto check — does any protected rice box overlap this sector?
-            vetoed_by = self._overlapping_rice(protected, x_start, x_end)
+            # Priority 1: obstacle blocks the sector
+            if self._has_overlap(obstacles, x_start, x_end):
+                commands.append(NozzleCommand(
+                    nozzle_id=n, x_start=x_start, x_end=x_end,
+                    spray=False, reason='obstacle_blocked'
+                ))
+                continue
 
-            if vetoed_by:
-                reason = 'rice_protected'
-                spray  = False
-            else:
-                # No rice in this sector → spray
-                # 'no_detection' when zero rice found anywhere; 'weed_zone' otherwise
-                reason = 'weed_zone' if protected else 'no_detection'
-                spray  = True
+            # Priority 2: rice protects the sector
+            if self._overlapping_rice(protected, x_start, x_end):
+                commands.append(NozzleCommand(
+                    nozzle_id=n, x_start=x_start, x_end=x_end,
+                    spray=False, reason='rice_protected'
+                ))
+                continue
 
+            # Priority 3: explicit weed detection in sector
+            if self._has_overlap(weeds, x_start, x_end):
+                commands.append(NozzleCommand(
+                    nozzle_id=n, x_start=x_start, x_end=x_end,
+                    spray=True, reason='weed_confirmed'
+                ))
+                continue
+
+            # Default: inverted-detection — no rice here → spray
+            reason = 'weed_zone' if protected else 'no_detection'
             commands.append(NozzleCommand(
-                nozzle_id=n,
-                x_start=x_start,
-                x_end=x_end,
-                spray=spray,
-                reason=reason,
+                nozzle_id=n, x_start=x_start, x_end=x_end,
+                spray=True, reason=reason
             ))
 
         return commands
@@ -239,10 +268,18 @@ class DiscriminationModule:
         Return True if any rice box has horizontal overlap with [x_start, x_end].
         Vertical overlap is not checked — the boom operates per column strip.
         """
-        for det in protected:
-            rice_x1, _, rice_x2, _ = det.box
-            # Overlap condition: not (rice right of sector OR rice left of sector)
-            if not (rice_x2 <= x_start or rice_x1 >= x_end):
+        return self._has_overlap(protected, x_start, x_end)
+
+    def _has_overlap(
+        self,
+        detections: List['Detection'],
+        x_start: int,
+        x_end: int,
+    ) -> bool:
+        """Return True if any detection box overlaps the column range [x_start, x_end]."""
+        for det in detections:
+            det_x1, _, det_x2, _ = det.box
+            if not (det_x2 <= x_start or det_x1 >= x_end):
                 return True
         return False
 
@@ -298,6 +335,16 @@ class DiscriminationModule:
         print(f"{'─' * 60}")
         print(f"  Protected rice boxes : {len(decision.protected_boxes)}")
         for i, d in enumerate(decision.protected_boxes):
+            b = d.box
+            print(f"    [{i+1}] score={d.score:.3f}  "
+                  f"box=[{b[0]:.0f},{b[1]:.0f},{b[2]:.0f},{b[3]:.0f}]")
+        print(f"  Weed detections      : {len(decision.weed_boxes)}")
+        for i, d in enumerate(decision.weed_boxes):
+            b = d.box
+            print(f"    [{i+1}] score={d.score:.3f}  "
+                  f"box=[{b[0]:.0f},{b[1]:.0f},{b[2]:.0f},{b[3]:.0f}]")
+        print(f"  Obstacle detections  : {len(decision.obstacle_boxes)}")
+        for i, d in enumerate(decision.obstacle_boxes):
             b = d.box
             print(f"    [{i+1}] score={d.score:.3f}  "
                   f"box=[{b[0]:.0f},{b[1]:.0f},{b[2]:.0f},{b[3]:.0f}]")

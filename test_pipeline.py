@@ -28,9 +28,10 @@ import torch
 from PIL import Image as PILImage
 
 # Modules under test
-from detection_pipeline  import DetectionPipeline, DetectionResult, Detection, CLASS_NAMES, RICE_CLASS
+from detection_pipeline  import (DetectionPipeline, DetectionResult, Detection,
+                                  CLASS_NAMES, RICE_CLASS, SafetyFlag)
 from discrimination      import DiscriminationModule, SprayDecision, NozzleCommand, SprayZone
-from pipeline_integration import AgriNavPipeline
+from pipeline_integration import AgriNavPipeline, _render_overlay
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -68,8 +69,10 @@ def _make_stub_pipeline(boxes_xyxy, scores, threshold=0.50):
     Build a DetectionPipeline with a stubbed model — no checkpoint needed.
     """
     pipe = object.__new__(DetectionPipeline)
-    pipe.threshold = threshold
-    pipe.device    = 'cpu'
+    pipe.threshold  = threshold
+    pipe.device     = 'cpu'
+    pipe.use_exgr   = False
+    pipe.exgr_alpha = 0.30
 
     import torchvision.transforms as T
     pipe._transform = T.Compose([
@@ -82,6 +85,9 @@ def _make_stub_pipeline(boxes_xyxy, scores, threshold=0.50):
     stub.eval.return_value = stub
     stub.side_effect = _model_output_factory(boxes_xyxy, scores)
     pipe.model = stub
+
+    # _log_frame writes to this path; point at a shared temp file so run_frame works
+    pipe.log_path = Path(tempfile.gettempdir()) / 'test_agrinav_pipeline.jsonl'
     return pipe
 
 
@@ -360,6 +366,7 @@ class TestAgriNavPipelineIntegration(unittest.TestCase):
             num_nozzles=nozzles,
             rice_veto_threshold=0.50,
         )
+        pipe.log_path = Path(tempfile.gettempdir()) / 'test_agrinav_pipeline.jsonl'
         return pipe
 
     def test_run_frame_returns_spray_decision(self):
@@ -424,6 +431,376 @@ class TestAgriNavPipelineIntegration(unittest.TestCase):
         dec = pipe.run_frame(self.img_path, verbose=False)
         self.assertEqual(len(dec.protected_boxes), 3)
 
+    def test_run_folder_empty_dir_returns_empty_list(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pipe   = self._make_pipeline([], [], nozzles=8)
+            result = pipe.run_folder(tmp_dir, verbose=False)
+            self.assertEqual(result, [])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST: _render_overlay
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestRenderOverlay(unittest.TestCase):
+    """Tests for the _render_overlay visualisation helper."""
+
+    def setUp(self):
+        self.img_path  = _make_test_image(w=800, h=600)
+        self.out_dir   = tempfile.mkdtemp()
+        self.out_path  = os.path.join(self.out_dir, 'test_render.jpg')
+
+    def tearDown(self):
+        if os.path.exists(self.img_path):
+            os.unlink(self.img_path)
+        if os.path.exists(self.out_path):
+            os.unlink(self.out_path)
+        os.rmdir(self.out_dir)
+
+    def _make_stub_decision(self, det_result):
+        """Build a minimal SprayDecision consistent with det_result."""
+        rice = det_result.rice_detections
+        return SprayDecision(
+            protected_boxes=rice,
+            weed_boxes=[],
+            obstacle_boxes=[],
+            spray_zones=[
+                SprayZone(x_start=0, x_end=400, y_start=0, y_end=600),
+            ],
+            nozzle_commands=[
+                NozzleCommand(nozzle_id=0, x_start=0,   x_end=400,
+                              spray=True,  reason='weed_zone'),
+                NozzleCommand(nozzle_id=1, x_start=400, x_end=800,
+                              spray=False, reason='rice_protected'),
+            ],
+            weed_coverage_pct=50.0,
+            frame_summary='stub',
+        )
+
+    def test_render_overlay_creates_file(self):
+        det_result = DetectionResult(
+            image_path=self.img_path,
+            orig_w=800, orig_h=600,
+            detections=[
+                Detection(box=[100, 50, 400, 300], score=0.85,
+                          label=0, label_name='Rice'),
+            ],
+            threshold=0.5,
+        )
+        decision = self._make_stub_decision(det_result)
+        _render_overlay(det_result, decision, self.out_path)
+        self.assertTrue(os.path.exists(self.out_path),
+                        "Overlay file was not created")
+        self.assertGreater(os.path.getsize(self.out_path), 0,
+                           "Overlay file is empty")
+
+    def test_render_overlay_no_detections(self):
+        """Renderer must not raise when there are zero detections."""
+        det_result = DetectionResult(
+            image_path=self.img_path,
+            orig_w=800, orig_h=600,
+            detections=[],
+            threshold=0.5,
+        )
+        decision = SprayDecision(
+            protected_boxes=[], weed_boxes=[], obstacle_boxes=[],
+            spray_zones=[SprayZone(0, 800, 0, 600)],
+            nozzle_commands=[
+                NozzleCommand(0, 0, 800, spray=True, reason='no_detection'),
+            ],
+            weed_coverage_pct=100.0,
+            frame_summary='empty',
+        )
+        # Should complete without raising
+        _render_overlay(det_result, decision, self.out_path)
+        self.assertTrue(os.path.exists(self.out_path))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST: SafetyFlag / evaluate_safety
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSafetyFlag(unittest.TestCase):
+    """Tests for DetectionResult.evaluate_safety() and the SafetyFlag enum."""
+
+    def _empty_result(self):
+        return DetectionResult(
+            image_path='fake.jpg', orig_w=800, orig_h=600,
+            detections=[], threshold=0.5,
+        )
+
+    def _rice_result(self):
+        return DetectionResult(
+            image_path='fake.jpg', orig_w=800, orig_h=600,
+            detections=[
+                Detection(box=[0, 0, 100, 100], score=0.9,
+                          label=0, label_name='Rice'),
+            ],
+            threshold=0.5,
+        )
+
+    def test_consecutive_empty_frames_triggers_row_lost(self):
+        """ROW_LOST when rice_count==0 and consecutive_empty_frames >= 3."""
+        r = self._empty_result()
+        self.assertIs(r.evaluate_safety(3), SafetyFlag.ROW_LOST)
+
+    def test_below_threshold_not_row_lost(self):
+        """Fewer than 3 consecutive empty frames must not trigger ROW_LOST."""
+        r = self._empty_result()
+        for n in (0, 1, 2):
+            flag = r.evaluate_safety(n)
+            self.assertIsNot(flag, SafetyFlag.ROW_LOST,
+                             f"Should not be ROW_LOST at streak={n}")
+
+    def test_row_lost_at_streak_five(self):
+        """ROW_LOST persists for streaks greater than 3."""
+        r = self._empty_result()
+        self.assertIs(r.evaluate_safety(5), SafetyFlag.ROW_LOST)
+
+    def test_rice_present_resets_to_clear(self):
+        """With rice detected the flag is CLEAR regardless of streak counter."""
+        r = self._rice_result()
+        # Streak counter is conceptually irrelevant once rice is seen,
+        # but the method still receives it — must not return ROW_LOST.
+        self.assertIs(r.evaluate_safety(10), SafetyFlag.CLEAR)
+
+    def test_obstacle_warning_large_box(self):
+        """Box covering > 20 % of image area triggers OBSTACLE_WARNING."""
+        # 800×600 = 480 000 px.  20% = 96 000.  400×300 = 120 000 > 96 000.
+        r = DetectionResult(
+            image_path='fake.jpg', orig_w=800, orig_h=600,
+            detections=[
+                Detection(box=[0, 0, 400, 300], score=0.9,
+                          label=2, label_name='Obstacle'),
+            ],
+            threshold=0.5,
+        )
+        self.assertIs(r.evaluate_safety(0), SafetyFlag.OBSTACLE_WARNING)
+
+    def test_small_box_returns_clear(self):
+        """Box well below 20 % threshold returns CLEAR."""
+        # 10×10 = 100 px << 96 000 threshold
+        r = DetectionResult(
+            image_path='fake.jpg', orig_w=800, orig_h=600,
+            detections=[
+                Detection(box=[0, 0, 10, 10], score=0.9,
+                          label=1, label_name='Weed'),
+            ],
+            threshold=0.5,
+        )
+        self.assertIs(r.evaluate_safety(0), SafetyFlag.CLEAR)
+
+    def test_default_streak_arg_is_zero(self):
+        """evaluate_safety() with no argument must not raise."""
+        r = self._empty_result()
+        flag = r.evaluate_safety()   # consecutive_empty_frames defaults to 0
+        self.assertIsNot(flag, SafetyFlag.ROW_LOST)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST  —  ExGR vegetation enhancement
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestExGR(unittest.TestCase):
+    """
+    Tests for DetectionPipeline._apply_exgr().
+
+    No checkpoint / GPU needed — we call the static method directly.
+    """
+
+    def _green_image(self) -> PILImage.Image:
+        """Solid green 8×8 image — high ExGR expected."""
+        arr = __import__('numpy').zeros((8, 8, 3), dtype='uint8')
+        arr[..., 1] = 200   # G channel max, R=B=0
+        return PILImage.fromarray(arr)
+
+    def _soil_image(self) -> PILImage.Image:
+        """Brownish soil pixel — ExGR should be near-zero or negative."""
+        arr = __import__('numpy').zeros((8, 8, 3), dtype='uint8')
+        arr[..., 0] = 150   # R
+        arr[..., 1] = 100   # G
+        arr[..., 2] = 50    # B
+        return PILImage.fromarray(arr)
+
+    def test_returns_pil_image(self):
+        img    = self._green_image()
+        result = DetectionPipeline._apply_exgr(img, alpha=0.3)
+        self.assertIsInstance(result, PILImage.Image)
+
+    def test_output_size_unchanged(self):
+        img    = self._green_image()
+        result = DetectionPipeline._apply_exgr(img, alpha=0.3)
+        self.assertEqual(result.size, img.size)
+
+    def test_green_pixels_boosted(self):
+        """Green channel of a pure-green image should increase after ExGR."""
+        import numpy as np
+        img    = self._green_image()
+        result = DetectionPipeline._apply_exgr(img, alpha=0.5)
+        orig_g = np.asarray(img)[..., 1].mean()
+        new_g  = np.asarray(result)[..., 1].mean()
+        self.assertGreater(new_g, orig_g)
+
+    def test_soil_pixels_near_unchanged(self):
+        """Brownish soil pixels (negative ExGR) should not be boosted."""
+        import numpy as np
+        img    = self._soil_image()
+        result = DetectionPipeline._apply_exgr(img, alpha=0.5)
+        orig   = np.asarray(img, dtype=float)
+        new    = np.asarray(result, dtype=float)
+        # total pixel energy should not increase significantly
+        self.assertAlmostEqual(orig.mean(), new.mean(), delta=5.0)
+
+    def test_alpha_zero_is_identity(self):
+        """With alpha=0 the image must be numerically identical."""
+        import numpy as np
+        img    = self._green_image()
+        result = DetectionPipeline._apply_exgr(img, alpha=0.0)
+        orig   = np.asarray(img, dtype=float)
+        new    = np.asarray(result, dtype=float)
+        np.testing.assert_allclose(orig, new, atol=1)   # ±1 for uint8 rounding
+
+    def test_all_black_does_not_raise(self):
+        """All-black image (no vegetation) must not crash."""
+        black = PILImage.fromarray(__import__('numpy').zeros((8, 8, 3), dtype='uint8'))
+        result = DetectionPipeline._apply_exgr(black, alpha=0.3)
+        self.assertIsNotNone(result)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST  —  VocRiceDataset
+# ═══════════════════════════════════════════════════════════════════════════
+
+DATA_ROOT = REPO_ROOT / 'data'
+
+class TestVocRiceDataset(unittest.TestCase):
+    """
+    Tests for data/voc_dataset.py.
+
+    A minimal synthetic VOC dataset is created in a temp directory:
+        tmp/
+          JPEGImages/  img0.jpg
+          Annotations/ img0.xml
+    """
+
+    def setUp(self):
+        import numpy as np
+        self.tmp = tempfile.mkdtemp()
+        img_dir  = Path(self.tmp) / 'JPEGImages'
+        ann_dir  = Path(self.tmp) / 'Annotations'
+        img_dir.mkdir(); ann_dir.mkdir()
+
+        # Create a 100×80 green test image
+        arr = np.zeros((80, 100, 3), dtype='uint8')
+        arr[..., 1] = 180
+        PILImage.fromarray(arr).save(str(img_dir / 'img0.jpg'))
+
+        # Write matching VOC XML (single 'rice seedling' box)
+        xml = """<annotation>
+  <folder>JPEGImages</folder>
+  <filename>img0.jpg</filename>
+  <size><width>100</width><height>80</height><depth>3</depth></size>
+  <segmented>0</segmented>
+  <object>
+    <name>rice seedling</name>
+    <bndbox>
+      <xmin>10</xmin><ymin>5</ymin>
+      <xmax>40</xmax><ymax>30</ymax>
+    </bndbox>
+  </object>
+</annotation>"""
+        (ann_dir / 'img0.xml').write_text(xml)
+
+        # Add DATA_ROOT to path so voc_dataset.py is importable
+        if str(DATA_ROOT) not in sys.path:
+            sys.path.insert(0, str(DATA_ROOT))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_ds(self, **kwargs):
+        from voc_dataset import VocRiceDataset
+        return VocRiceDataset(self.tmp, **kwargs)
+
+    # ── basic interface ───────────────────────────────────────────────────
+
+    def test_len_returns_one(self):
+        ds = self._make_ds()
+        self.assertEqual(len(ds), 1)
+
+    def test_getitem_returns_tensor_and_target(self):
+        import torch
+        ds = self._make_ds()
+        tensor, target = ds[0]
+        self.assertIsInstance(tensor, torch.Tensor)
+        self.assertIn('boxes', target)
+        self.assertIn('labels', target)
+
+    def test_tensor_shape(self):
+        """Output tensor must be (3, 600, 1000) after resize."""
+        ds = self._make_ds()
+        tensor, _ = ds[0]
+        self.assertEqual(tuple(tensor.shape), (3, 600, 1000))
+
+    def test_boxes_scaled_to_model_space(self):
+        """Boxes must be in (0, TARGET_W) horizontally."""
+        ds = self._make_ds()
+        _, target = ds[0]
+        boxes = target['boxes']
+        self.assertGreater(boxes.shape[0], 0)
+        self.assertTrue((boxes[:, 0] >= 0).all())
+        self.assertTrue((boxes[:, 2] <= 1000).all())
+
+    def test_label_is_rice_class(self):
+        """'rice seedling' must map to label 0 (RICE_CLASS)."""
+        ds = self._make_ds()
+        _, target = ds[0]
+        self.assertEqual(target['labels'][0].item(), 0)
+
+    def test_exgr_mode_does_not_change_tensor_shape(self):
+        """ExGR enhancement must not alter tensor dimensions."""
+        ds = self._make_ds(use_exgr=True)
+        tensor, _ = ds[0]
+        self.assertEqual(tuple(tensor.shape), (3, 600, 1000))
+
+    def test_unknown_xml_class_skipped(self):
+        """Annotations with an unknown class name produce zero boxes."""
+        import xml.etree.ElementTree as ET
+        ann_path = Path(self.tmp) / 'Annotations' / 'img0.xml'
+        tree = ET.parse(str(ann_path))
+        root = tree.getroot()
+        for obj in root.findall('object'):
+            obj.find('name').text = 'unknown_thing'
+        tree.write(str(ann_path))
+
+        ds = self._make_ds()
+        _, target = ds[0]
+        self.assertEqual(target['boxes'].shape[0], 0)
+
+    def test_collate_fn_stacks_images(self):
+        """collate_fn must return a (1, 3, 600, 1000) batch tensor."""
+        from voc_dataset import VocRiceDataset
+        import torch
+        ds     = self._make_ds()
+        batch  = [ds[0]]
+        images, targets = VocRiceDataset.collate_fn(batch)
+        self.assertEqual(tuple(images.shape), (1, 3, 600, 1000))
+        self.assertEqual(len(targets), 1)
+
+    def test_class_distribution_returns_dict(self):
+        """class_distribution() must return {0: 1} for our single-box sample."""
+        ds = self._make_ds()
+        dist = ds.class_distribution()
+        self.assertIsInstance(dist, dict)
+        self.assertEqual(dist.get(0, 0), 1)
+
+    def test_missing_root_raises(self):
+        """Pointing at a non-existent directory must raise FileNotFoundError."""
+        from voc_dataset import VocRiceDataset
+        with self.assertRaises(FileNotFoundError):
+            VocRiceDataset('/tmp/__nonexistent_dir__xyz')
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # RUNNER
@@ -438,6 +815,10 @@ if __name__ == '__main__':
         TestDetectionPipeline,
         TestDiscriminationModule,
         TestAgriNavPipelineIntegration,
+        TestRenderOverlay,
+        TestSafetyFlag,
+        TestExGR,
+        TestVocRiceDataset,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

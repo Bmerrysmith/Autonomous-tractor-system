@@ -76,6 +76,8 @@ def _stub_pipeline(boxes_xyxy, scores, nozzles=16, threshold=0.50):
     det = object.__new__(DetectionPipeline)
     det.threshold  = threshold
     det.device     = 'cpu'
+    det.use_exgr   = False
+    det.exgr_alpha = 0.30
     det._transform = T.Compose([
         T.Resize((600, 1000)),
         T.ToTensor(),
@@ -91,6 +93,7 @@ def _stub_pipeline(boxes_xyxy, scores, nozzles=16, threshold=0.50):
         num_nozzles=nozzles,
         rice_veto_threshold=threshold,
     )
+    pipe.log_path = Path(__file__).resolve().parent / 'pipeline_log.jsonl'
     return pipe
 
 
