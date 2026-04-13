@@ -64,7 +64,7 @@ def build_figures(output_dir: Path, seed: int = 7) -> tuple[list[Path], dict[str
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate standalone research figures")
-    parser.add_argument("--output-dir", default="lane detection(results)", help="Directory to save figures")
+    parser.add_argument("--output-dir", default="results", help="Directory to save figures")
     parser.add_argument("--seed", type=int, default=7, help="Random seed for synthetic data")
     args = parser.parse_args()
 
