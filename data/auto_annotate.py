@@ -142,13 +142,9 @@ def preview_detections(image_path, boxes, scores):
 
 # ── Main annotation loop ────────────────────────────────────────────────────
 
-CANDIDATE_LABELS = [
-    "plant",
-    "crop",
-    "rice plant",
-    "green plant",
-    "paddy plant",
-]
+# Text prompt for Grounding DINO (period-separated phrases)
+# The pipeline accepts a single text string, NOT a list of labels.
+DETECTION_PROMPT = "plant . crop . rice plant . green plant . paddy plant"
 
 # Normalize all detected labels to 'Rice' in the XML
 LABEL = 'Rice'
@@ -180,7 +176,7 @@ def annotate_folder(images_dir, output_dir, threshold=0.25,
         return
 
     print(f"Found {len(img_paths)} images in {images_dir}")
-    print(f"Threshold: {threshold}  |  Labels: {CANDIDATE_LABELS}")
+    print(f"Threshold: {threshold}  |  Prompt: {DETECTION_PROMPT}")
     print(f"Output:    {output_dir}\n")
 
     pipe = load_grounding_dino(device)
@@ -201,7 +197,7 @@ def annotate_folder(images_dir, output_dir, threshold=0.25,
         # Run detection
         results = pipe(
             pil_img,
-            candidate_labels=CANDIDATE_LABELS,
+            text=DETECTION_PROMPT,
             threshold=threshold,
         )
 

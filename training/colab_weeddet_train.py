@@ -238,60 +238,43 @@ import weeddet_for_VSCode as wd
 print(f"WeedDet module loaded: {wd.__file__}")
 
 
-# ── 6. FixedWeedDataset — BOUNDING BOX COORDINATE SCALING FIX ──────────────
+# ── 6. Box coordinate scaling sanity check ────────────────────────────────
 #
-# WHY THIS EXISTS:
-#   The WeedDataset in weeddet_for_VSCode.py correctly resizes images to
-#   (600, 1000) in __getitem__. However an older version did NOT rescale
-#   the box coordinates to match the resized dimensions, leaving boxes in
-#   the original image pixel space.
+# HISTORY: An older version of WeedDataset did NOT rescale bounding box
+# coordinates after resizing images to (600, 1000), causing loss → 0.0000.
+# The current weeddet_for_VSCode.py WeedDataset.__getitem__ includes the
+# fix (lines 701-704: boxes *= tW/orig_w, tH/orig_h).
 #
-#   Result: IoU(ground_truth_boxes, anchors) = 0 for all anchors.
-#   Result: no positive anchor assignments, no gradient, loss → 0.0000.
-#   PyTorch does not raise an error. Training appears to run normally.
+# A FixedWeedDataset wrapper that applied the scaling a SECOND time was
+# previously used here. That caused DOUBLE-SCALING — boxes shrank by
+# (scale_factor)^2. It has been REMOVED.
 #
-#   The current weeddet_for_VSCode.py already includes the fix in
-#   WeedDataset.__getitem__. This class is kept as an explicit guard in
-#   case the module version you are using does not have it.
+# The sanity check below verifies boxes are in the correct coordinate space.
 # ───────────────────────────────────────────────────────────────────────────
 
-class FixedWeedDataset(wd.WeedDataset):
-    """
-    Explicit bounding box coordinate scaling guard.
-    Applies sx = TARGET_W / orig_w, sy = TARGET_H / orig_h
-    to all box coordinates in __getitem__.
-    """
-    TARGET_H = 600
-    TARGET_W = 1000
+print("Verifying box coordinate scaling in WeedDataset ...")
+_test_ds = wd.WeedDataset(VOC_DIR, 'train', (600, 1000), augment=False)
+_sample = None
+for _i in range(min(20, len(_test_ds))):
+    _sample = _test_ds[_i]
+    if _sample is not None and _sample[1]['boxes'].numel() > 0:
+        break
 
-    def __getitem__(self, idx):
-        result = super().__getitem__(idx)
-        if result is None:
-            return None
-        img, target = result
-        if target is None or 'boxes' not in target:
-            return img, target
-        boxes = target['boxes']
-        if boxes.numel() == 0:
-            return img, target
-
-        orig_h = target.get('orig_h', self.TARGET_H)
-        orig_w = target.get('orig_w', self.TARGET_W)
-        sx = self.TARGET_W / max(orig_w, 1)
-        sy = self.TARGET_H / max(orig_h, 1)
-
-        boxes = boxes.clone().float()
-        boxes[:, 0] *= sx   # xmin
-        boxes[:, 2] *= sx   # xmax
-        boxes[:, 1] *= sy   # ymin
-        boxes[:, 3] *= sy   # ymax
-        target['boxes'] = boxes
-        return img, target
-
-
-# Monkey-patch — train_with_progress picks this up automatically
-wd.WeedDataset = FixedWeedDataset
-print("FixedWeedDataset installed. Coordinate scaling is active.")
+if _sample is not None and _sample[1]['boxes'].numel() > 0:
+    _img_t, _tgt = _sample
+    _boxes = _tgt['boxes']
+    _max_x = _boxes[:, [0, 2]].max().item()
+    _max_y = _boxes[:, [1, 3]].max().item()
+    assert _max_x <= 1000 + 1, (
+        f"Box x-coord {_max_x:.0f} exceeds target width 1000 — "
+        f"scaling is broken! Check WeedDataset.__getitem__")
+    assert _max_y <= 600 + 1, (
+        f"Box y-coord {_max_y:.0f} exceeds target height 600 — "
+        f"scaling is broken! Check WeedDataset.__getitem__")
+    print(f"  ✓ Boxes are in target space (max_x={_max_x:.0f}, max_y={_max_y:.0f})")
+else:
+    print("  ⚠ Could not find a sample with boxes — check dataset paths")
+del _test_ds, _sample
 
 
 # ── 7. GPU check ────────────────────────────────────────────────────────────

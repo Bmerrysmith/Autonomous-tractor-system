@@ -73,7 +73,9 @@ python inference/inference_rice.py \
 
 ---
 
-## Critical Bug (FIXED — do not remove the fix)
+## Critical Bugs (both FIXED)
+
+### Bug 1 — Box coordinate space mismatch (loss → 0.0000)
 
 **Symptom:** Loss = 0.0000 from epoch 2. Training runs normally but learns nothing.
 
@@ -81,14 +83,23 @@ python inference/inference_rice.py \
 WeedDet resizes images to (600, 1000). Boxes were NOT being rescaled to match.  
 Result: IoU(ground_truth, anchors) = 0 → no positive anchors → no gradient.
 
-**Fix:** `FixedWeedDataset` in `colab_weeddet_train.py` applies:
+**Fix:** `WeedDataset.__getitem__` in `weeddet_for_VSCode.py` now applies:
 ```python
-sx = 1000 / orig_w
-sy = 600  / orig_h
-boxes[:, [0, 2]] *= sx   # xmin, xmax
-boxes[:, [1, 3]] *= sy   # ymin, ymax
+boxes[:, [0,2]] *= tW / orig_w   # scale x-coords to target width
+boxes[:, [1,3]] *= tH / orig_h   # scale y-coords to target height
 ```
-The current `WeedDataset` in `weeddet_for_VSCode.py` already includes this fix.
+
+### Bug 2 — Double-scaling in FixedWeedDataset (boxes shrink incorrectly)
+
+**Symptom:** Detections appear but are systematically mis-sized.
+
+**Cause:** `FixedWeedDataset` in `colab_weeddet_train.py` applied bounding box
+coordinate scaling a SECOND time on top of the fix already in `WeedDataset`.
+Boxes ended up scaled by (scale_factor)² — shrinking dramatically for large images.
+
+**Fix:** `FixedWeedDataset` and its monkey-patch have been REMOVED.
+`colab_weeddet_train.py` now includes a runtime sanity check that verifies
+box coordinates are within [0, 1000] × [0, 600] after loading.
 
 ---
 
