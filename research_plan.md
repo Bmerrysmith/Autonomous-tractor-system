@@ -1,8 +1,7 @@
-# Bilal Research Plan: Lane Detection, Localization, and LiDAR-Camera Integration
+# Lane Detection Research Plan: Localization and LiDAR-Camera Integration
 
 **Project:** Autonomous Agricultural Tractor
-**Role:** Bilal Dogutas — Lane Detection & Localization
-**Branch:** `bilal/lane-detection`
+**Role:** Lane Detection & Localization
 
 ## 1. Research Goal
 
@@ -10,7 +9,7 @@ Build the lane detection and localization subsystem for an autonomous paddy-fiel
 
 The focus is not only implementation. The work should also read like a research contribution: clear problem framing, literature-backed algorithm choices, measurable outputs, and an integration story that connects perception, localization, and mission control.
 
-## 2. Bilal's Scope
+## 2. Scope
 
 My work covers two tightly connected research threads:
 
@@ -75,7 +74,7 @@ Responsibilities:
 - detect crop row edges or clusters
 - estimate left/right row boundaries
 - compute row centerline
-- publish lane geometry for steering and for Benny's ROI subscriber
+- publish lane geometry for steering and for the ROI subscriber
 
 Suggested outputs:
 
@@ -115,7 +114,7 @@ Recommended contract:
 My subsystem has two downstream impacts:
 
 1. Navigation: the mission controller can keep the tractor aligned in rows and recover from drift.
-2. Detection: row boundary data can constrain Benny's weed detection pipeline to the valid inter-row region.
+2. Detection: row boundary data can constrain the weed detection pipeline to the valid inter-row region.
 
 This is the cleanest way to show that lane detection is not just a support feature. It is a system-wide enabler.
 
@@ -146,7 +145,7 @@ The write-up should answer the following questions:
 
 - publish row geometry in ROS
 - verify planner compatibility
-- verify Benny's ROI subscriber can consume the row output
+- verify the ROI subscriber can consume the row output
 
 ### Step 4: Metrics
 
@@ -212,7 +211,7 @@ Recommended choice for this tractor use case:
 - DWA if the goal is simple, real-time detours in structured rows
 - TEB if the mission controller needs stronger vehicle-constraint handling
 
-This paper choice should be coordinated with Anthony because it affects the mission controller state machine.
+This paper choice should be coordinated with the mission controller because it affects the state machine.
 
 ## 12. Final Deliverable
 
