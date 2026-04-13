@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>undercanopy_ekf_nav</name>
+  <version>1.0.0</version>
+  <description>
+    LiDAR-IMU EKF for under-canopy row following with GNSS outage bridging.
+    Implements crop-row detection via 2D LiDAR, EKF-based sensor fusion
+    (GNSS + IMU + wheel odometry), and row centerline output for
+    lane-following and path-planner return targets.
+    
+    Part of the Autonomous Agricultural Tractor project — CEN 4930, FGCU Spring 2026.
+    Author: Krish Shah
+  </description>
+  <maintainer email="ksshah1283@eagle.fgcu.edu">Krish Shah</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>roscpp</build_depend>
+  <build_depend>rospy</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>message_generation</build_depend>
+
+  <exec_depend>roscpp</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <exec_depend>message_runtime</exec_depend>
+</package>

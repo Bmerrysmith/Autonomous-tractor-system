@@ -1,0 +1,74 @@
+<!-- 
+  undercanopy_nav.launch
+  
+  Full launch for the under-canopy EKF navigation stack.
+  Launches all 4 custom nodes + optional simulated sensors.
+  
+  Usage:
+    roslaunch undercanopy_ekf_nav undercanopy_nav.launch
+    roslaunch undercanopy_ekf_nav undercanopy_nav.launch use_sim:=true
+    
+  Author: Krish Shah — CEN 4930, FGCU Spring 2026
+-->
+<launch>
+  <!-- Arguments -->
+  <arg name="use_sim" default="true" doc="Use simulated sensor data (no Gazebo needed)" />
+  <arg name="row_spacing" default="0.76" doc="Crop row spacing in meters" />
+  <arg name="enable_cmd_vel" default="true" doc="Enable velocity command output" />
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Simulated Sensors (for testing without Gazebo)                     -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <group if="$(arg use_sim)">
+    <node pkg="undercanopy_ekf_nav" type="sim_sensor_publisher.py"
+          name="sim_sensor_publisher" output="screen">
+      <param name="row_spacing" value="$(arg row_spacing)" />
+      <param name="robot_speed" value="0.3" />
+      <param name="gnss_outage_start" value="15.0" />
+      <param name="gnss_outage_end" value="35.0" />
+      <param name="imu_noise_std" value="0.01" />
+      <param name="odom_noise_std" value="0.02" />
+    </node>
+  </group>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Node 1: LiDAR Crop Row Detection (Krish + Bilal shared)          -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <node pkg="undercanopy_ekf_nav" type="lidar_row_detection_node.py"
+        name="lidar_row_detection_node" output="screen">
+    <param name="row_spacing" value="$(arg row_spacing)" />
+    <param name="max_range" value="5.0" />
+    <param name="min_range" value="0.1" />
+    <param name="ransac_iterations" value="100" />
+    <param name="ransac_threshold" value="0.05" />
+  </node>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Node 2: EKF Localization (GNSS + IMU + Odom fusion)              -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <node pkg="undercanopy_ekf_nav" type="ekf_localization_node.py"
+        name="ekf_localization_node" output="screen">
+  </node>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Node 3: GNSS Outage Bridge                                        -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <node pkg="undercanopy_ekf_nav" type="gnss_outage_bridge_node.py"
+        name="gnss_outage_bridge_node" output="screen">
+    <param name="gnss_timeout" value="2.0" />
+    <param name="degraded_threshold" value="1.0" />
+    <param name="max_position_covariance" value="10.0" />
+  </node>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Node 4: Row Centerline Output                                      -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <node pkg="undercanopy_ekf_nav" type="row_centerline_node.py"
+        name="row_centerline_node" output="screen">
+    <param name="row_spacing" value="$(arg row_spacing)" />
+    <param name="lookahead_distance" value="1.5" />
+    <param name="max_linear_vel" value="0.5" />
+    <param name="max_angular_vel" value="0.5" />
+    <param name="enable_cmd_vel" value="$(arg enable_cmd_vel)" />
+  </node>
+</launch>
