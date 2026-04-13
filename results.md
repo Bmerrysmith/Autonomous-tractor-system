@@ -1,17 +1,17 @@
 # Lane Detection Research: Visual Walkthrough
 
-This file lays out every generated visual and explains the full workflow from architecture to model outcomes.
+This file lays out the generated visuals and explains the workflow from architecture to model outcomes.
 
 ## System Overview
 
-![System Overview](research_outputs/system_overview.png)
+![System Overview](lane%20detection(results)/system_overview.png)
 
 - Shows the full flow: row geometry, ROI constraints, localization fusion, control linkage, and reporting.
 - Clarifies where each module output is consumed downstream.
 
 ## Row Geometry
 
-![Row Geometry](research_outputs/row_geometry.png)
+![Row Geometry](lane%20detection(results)/row_geometry.png)
 
 - Left and right row boundaries are estimated over distance.
 - The centerline is derived between boundaries.
@@ -19,63 +19,63 @@ This file lays out every generated visual and explains the full workflow from ar
 
 ## Row Quality
 
-![Row Quality](research_outputs/row_quality.png)
+![Row Quality](lane%20detection(results)/row_quality.png)
 
 - Corridor width trend plus confidence trend.
 - Useful for detecting unstable sections and deciding when to reduce trust in lane-derived constraints.
 
 ## Localization (Trajectory + Error)
 
-![Localization](research_outputs/localization.png)
+![Localization](lane%20detection(results)/localization.png)
 
 - Compares reference path, raw GNSS, and EKF-fused trajectory.
 - Also shows time-domain error behavior.
 
 ## Localization Components
 
-![Localization Components](research_outputs/localization_components.png)
+![Localization Components](lane%20detection(results)/localization_components.png)
 
 - Yaw channels: reference, IMU, EKF.
 - Position error channels through time.
 
 ## Confidence Gate
 
-![Confidence Gate](research_outputs/confidence_gate.png)
+![Confidence Gate](lane%20detection(results)/confidence_gate.png)
 
 - Fusion confidence, sensor corroboration, and final gate score.
 - Demonstrates reliability behavior for action gating.
 
 ## Planning Tradeoffs
 
-![Planning Tradeoffs](research_outputs/planning_tradeoffs.png)
+![Planning Tradeoffs](lane%20detection(results)/planning_tradeoffs.png)
 
 - Scores DWA/TEB/RRT* across criteria with response-time overlay.
 - Supports algorithm selection by operational priorities.
 
 ## Model Training Curves
 
-![Model Training Curves](research_outputs/model_training_curves.png)
+![Model Training Curves](lane%20detection(results)/model_training_curves.png)
 
 - Train and validation MSE across 220 epochs.
 - Curves show stable convergence.
 
 ## Prediction Scatter
 
-![Prediction Scatter](research_outputs/model_prediction_scatter.png)
+![Prediction Scatter](lane%20detection(results)/model_prediction_scatter.png)
 
 - Predicted vs true targets for `center_offset`, `row_width`, `heading_error`.
 - Tight clustering around diagonal indicates strong fit quality.
 
 ## Error Histograms
 
-![Error Histograms](research_outputs/model_error_histograms.png)
+![Error Histograms](lane%20detection(results)/model_error_histograms.png)
 
 - Residual distributions by target.
 - Errors are centered near zero with compact spread.
 
 ## Numeric Results
 
-From `research_outputs/lane_model_metrics.json`:
+From `lane detection(results)/lane_model_metrics.json`:
 
 - Epochs: 220
 - Batch size: 128
@@ -89,5 +89,5 @@ From `research_outputs/lane_model_metrics.json`:
 ## Regenerate Everything
 
 ```bash
-python -m research.run_research --output-dir research_outputs --seed 21
+python -m training.run_research --output-dir "lane detection(results)" --seed 21
 ```
