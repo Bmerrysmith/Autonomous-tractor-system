@@ -11,3 +11,9 @@ dataset/
 .ipynb_checkpoints/
 .vscode/
 .idea/
+
+# deps / local junk
+node_modules/
+package.json
+package-lock.json
+*.b64

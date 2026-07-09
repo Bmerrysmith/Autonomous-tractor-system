@@ -1,134 +1,72 @@
-# AgriNav — Weed Detection & Plant Identification Subsystem
+# AgriNav — Project Root
 
-**Author:** Benjamin Merryman-Smith | Florida Gulf Coast University  
-**Project:** AgriNav Autonomous Tractor  
-**Papers:** Peng et al. 2022 (WeedDet) · Jiang et al. 2020 (GCN Weed Recognition)
-
----
-
-## What This Is
-
-Weed detection subsystem for an autonomous paddy-field tractor.  
-**Detection logic is inverted:** the model finds rice plants (protected class).  
-Anything not inside a high-confidence rice box = spray target.  
-A hardcoded rice veto in the confidence gate ensures rice is never sprayed.
+**Author:** Benjamin Merryman-Smith | FGCU Whitaker College of Engineering
+**Course:** CEN 4930 — Introduction to Autonomous Driving Systems, Spring 2026
+**GitHub:** https://github.com/Bmerrysmith/Autonomous-tractor-system
 
 ---
 
-## Repository Structure
+## Start here
+
+0. `TEST_LOG.md` — **one-test-at-a-time tracker with interaction analysis (CHECK BEFORE EVERY RUN)**
+1. `COCO_MIGRATION_2026-07-07.md` — V7 action log + next plan (see also `AUDIT_2026-07-09_V7.md`)
+2. `RESEARCH_PLAN_DETECTION_ACCURACY.md` — the detection-accuracy research plan + results table
+3. `AgriNav_Project_Tracker.md` — team/course tracker
+4. `MASTER_PROJECT_HISTORY.md` — full timeline (Phases 1–10)
+
+## Folder structure
 
 ```
-agrinav-weed-detection/
+agrinav_full/
+├── README.md                          ← you are here
+├── COCO_MIGRATION_2026-07-07.md       ← action log + next plan (READ FIRST)
+├── RESEARCH_PLAN_DETECTION_ACCURACY.md
+├── AgriNav_Project_Tracker.md
+├── MASTER_PROJECT_HISTORY.md
+│
+├── data/                              ← VOC-era scripts (split_coco.py NOT yet in repo — see below)
 ├── models/
-│   └── weeddet_for_VSCode.py     ← Complete WeedDet model (train + infer)
-├── data/
-│   ├── step1_extract.py          ← Inspect and extract dataset zip
-│   ├── auto_annotate.py          ← Grounding DINO auto-annotation
-│   ├── coco_to_voc.py            ← Convert COCO JSON → PASCAL VOC XML
-│   └── step2_split.py            ← Validate annotations, generate train/val split
+│   ├── weeddet_v6b.py                 ← CURRENT model file (synced from Drive 2026-07-09, has cls_hard_target fix)
+│   └── weeddet_for_VSCode.py          ← legacy
 ├── training/
-│   └── colab_weeddet_train.py    ← Full Colab training cell (includes FixedWeedDataset)
-├── inference/
-│   └── inference_rice.py         ← Run inference + green/red visualization
-└── notebooks/
-    └── rice_detection_fixed.ipynb ← Kaggle baseline RetinaNet notebook
+│   ├── riceseg_pretrain.py            ← RiceSEG → WeedDet backbone pretraining (synced 2026-07-09)
+│   └── colab_weeddet_train.py         ← legacy
+├── active/
+│   ├── ACTIVE_NOTES.md                ← what to do next
+│   └── (V5-era notebooks — the live V7 notebook is on Colab, see Drive links below)
+├── archive/                           ← v1–v4 iterations
+├── paper/                             ← IEEE paper revision docs
+└── drive_links/GOOGLE_DRIVE_INVENTORY.md
 ```
 
----
+⚠️ **Not yet in this repo** (add when convenient): `data/split_coco.py`, `run_pretrain.ipynb`,
+`weeddet_trainingV7_coco.ipynb` (live on Colab, changes with each run), `USING_RICESEG_BACKBONE.md`.
 
-## Quick Start
+## Pipeline (all fresh-run)
 
-### Option A — Run on Kaggle (baseline RetinaNet)
-1. Upload `rice_detection_fixed.ipynb` to Kaggle
-2. Add datasets: `bennymerryman/rice-detection` (both COCO datasets)
-3. Run all cells — trains 12 epochs, saves `rice_retinanet.pth`
+1. `split_coco.py` → leakage-safe COCO train/valid/test (done → `rice_detection_coco_split.zip` on Drive)
+2. `run_pretrain.ipynb` (Drive) → `riceseg_backbone.pth` (done, 94 MB)
+3. `weeddet_trainingV7_coco.ipynb` (Colab), `BACKBONE_INIT ∈ {scratch, riceseg, imagenet}` → train + COCO eval
 
-### Option B — Train WeedDet on Colab
-1. Upload `merged_dataset.zip` to `MyDrive/`
-2. Upload `weeddet_for_VSCode.py` to `/content/`
-3. Paste `training/colab_weeddet_train.py` into a Colab cell and run
+## Quick status (2026-07-09)
 
-### Option C — Run locally (RTX 4060 or better)
-```bash
-pip install torch torchvision pillow tqdm transformers
+| Item | Status |
+|---|---|
+| COCO leakage-safe split (1079/134/134) | ✅ delivered |
+| RiceSEG backbone pretrained + exported | ✅ `riceseg_backbone.pth` |
+| VFL classification-target bug | ✅ diagnosed + fixed (`cls_hard_target=True`), validated on overfit-16 (AP@50 0.60) |
+| V7 riceseg full runs | ❌ both failed (0.0088 pre-fix; ~0.000 post-fix with frozen det/img) — EMA/grad-clip under suspicion |
+| Scratch control on COCO split | ⚠️ NOT RUN — blocking; this is the real baseline |
+| imagenet ablation, test-split eval, YOLOv8s baseline | ⚠️ pending |
+| Paper: same-distribution AP@0.5/0.75 | ⚠️ still the blocking item |
 
-# Auto-annotate images with Grounding DINO
-python data/auto_annotate.py --images ./images --output ./annotations
+## Google Drive (active folders)
 
-# Convert COCO JSON to VOC XML
-python data/coco_to_voc.py --json merged.json --images ./images --output ./voc_dataset
+| Folder | Path | Contents |
+|---|---|---|
+| v2 | `MyDrive/weeddet_v2_checkpoints/` | `weeddet_v6b.py` + `rice_detection_coco_split.zip` |
+| v6 | `MyDrive/weeddet_v6_checkpoints/` | `riceseg_backbone.pth` |
+| v7 | `MyDrive/weeddet_v7_checkpoints/` | V7 training checkpoints + curves |
+| pretrain | `MyDrive/riceseg_pretraining/` | `riceseg_pretrain.py`, `RiceSEG.zip`, `run_pretrain.ipynb` |
 
-# Generate train/val split
-python data/step2_split.py --root ./voc_dataset
-
-# Train
-python models/weeddet_for_VSCode.py  # runs build check
-# Then call train() or train_with_progress() from weeddet_for_VSCode
-
-# Inference
-python inference/inference_rice.py \
-    --model ./checkpoints/weeddet_best.pth \
-    --image ./test_field.jpg
-```
-
----
-
-## Critical Bug (FIXED — do not remove the fix)
-
-**Symptom:** Loss = 0.0000 from epoch 2. Training runs normally but learns nothing.
-
-**Cause:** VOC XML bounding box coordinates are in original image pixel space.  
-WeedDet resizes images to (600, 1000). Boxes were NOT being rescaled to match.  
-Result: IoU(ground_truth, anchors) = 0 → no positive anchors → no gradient.
-
-**Fix:** `FixedWeedDataset` in `colab_weeddet_train.py` applies:
-```python
-sx = 1000 / orig_w
-sy = 600  / orig_h
-boxes[:, [0, 2]] *= sx   # xmin, xmax
-boxes[:, [1, 3]] *= sy   # ymin, ymax
-```
-The current `WeedDataset` in `weeddet_for_VSCode.py` already includes this fix.
-
----
-
-## Datasets
-
-| Dataset | Images | Source | Used For |
-|---|---|---|---|
-| rice-hainan | ~1,347 | Roboflow / Kaggle | WeedDet training |
-| rice_detection_for_export | ~250 | Roboflow / Kaggle | WeedDet training |
-| Severity labeled (4 classes) | ~3,947 | Various | GCN only (filtered from WeedDet) |
-
-Merged COCO: ~5,544 images total. ~1,596 have real per-plant boxes.  
-Full-image placeholder boxes from severity datasets are filtered by `coco_to_voc.py`.
-
----
-
-## Architecture (WeedDet)
-
-```
-Input: 1000×600 RGB
-  ↓
-Det-ResNet-50 (modified stem: two 3×3 convs + DetResidualBlock)
-  ↓  C3 (512ch), C4 (1024ch), C5 (2048ch)
-eFPN — produces only P3/P4/P5 (no P6/P7, saves 7.71M params)
-  ↓  256ch per level
-ERetina-Head — 1 conv (64ch) + Large Separable Conv (k=7)
-  ↓
-WeedDetLoss: SmoothL1 + GIoU (regression) + VariFocal (classification)
-Anchors: base_scale=6, 3 aspect ratios × 3 scales = 9 per location
-```
-
-Training: SGD lr=0.01, batch=2, 12 epochs, warmup 500 iters,  
-          MultiStepLR decay at [8, 11], freeze BatchNorm, grad clip 1.0
-
----
-
-## Papers
-
-1. Peng et al. (2022) — "Weed Detection in Paddy Field Using an Improved RetinaNet Network"  
-   *Computers and Electronics in Agriculture*, vol. 199, p. 107179.
-
-2. Jiang et al. (2020) — "CNN Feature Based Graph Convolutional Network for Weed and Crop Recognition in Smart Farming"  
-   *Computers and Electronics in Agriculture*, vol. 174, p. 105450.
+See `drive_links/GOOGLE_DRIVE_INVENTORY.md` for IDs.
