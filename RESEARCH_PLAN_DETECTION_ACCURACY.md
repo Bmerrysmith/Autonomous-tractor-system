@@ -32,6 +32,12 @@ detection accuracy over (a) training from scratch and (b) ImageNet initializatio
 |---|---|---|---|---|---|---|
 | 2026-07-08 | riceseg (soft VFL targets) | valid | 0.0088 | 0.0000 | 0.0012 | run #1, pre-fix. INVALID — VFL target bug |
 | 2026-07-09 | riceseg (hard targets) | valid | ≤0.0010 | 0.0000 | — | run #2, killed ~ep 61. det/img frozen — EMA/clip suspect |
+| 2026-07-09 | riceseg + T1 (all-neg) | valid | 0.0017 | 0.0000 | 0.0002 | T1 20-ep gate. FAIL — collapse-to-prior (det/img 239.6). Next: T2 grad-clip |
+| 2026-07-09 | riceseg + T1 + clip 10 (T2) | valid | 0.0412 | 0.0102 | 0.0114 | ep-4 peak then decay. AP large = 0.000 → anchors too small (T4). Best clean-split number so far |
+| 2026-07-09 | riceseg + T1 + clip 10 + anchors 6 (T4) | valid | **0.1327** | 0.0061 | 0.0323 | ep-4 EMA peak; ≈ old leaky 0.166 baseline on CLEAN split. AP large 0.000, AP@75 ~0. Next: T5 lr 0.0005 |
+| 2026-07-09 | riceseg + lr 5e-4 (T5) | valid | **0.1406** | 0.0123 | 0.0352 | new best @ ep 4; monotonic decay after → lr exonerated; forgetting hypothesis → T6 scratch control |
+| 2026-07-09 | **scratch control (T6)** | valid | 0.0450 | 0.0009 | 0.0080 | slow climb, peak ep 8, no spike-collapse → forgetting CONFIRMED. riceseg transient = 3.1× scratch. Paper baseline @ 20 ep |
+| 2026-07-14 | **riceseg FROZEN backbone (T7)** | valid | 0.1040 | 0.0051 | 0.0230 | STABLE — no decay, raw≈EMA, still rising @ ep 20. 2.3× scratch with 2.88M trainable params. → T7b 100 ep |
 | | scratch | valid | | | | PENDING — run before any more riceseg attempts |
 | | imagenet | valid | | | | PENDING |
 | | best condition | test | | | | run ONCE at the end |

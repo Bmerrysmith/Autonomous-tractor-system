@@ -1430,4 +1430,18 @@ def train_with_progress(config):
             torch.save({'epoch': epoch, 'state_dict': state_dict,
                         'raw_state_dict': model.state_dict(),
                         'optimizer': optimizer.state_dict(),
-                        'loss': best_loss, 'config': con
+                        'loss': best_loss, 'config': config,
+                        'scaler': scaler.state_dict() if use_amp else None}, path)
+            print(f"  ★ Best checkpoint -> {path}")
+
+        if epoch % save_every == 0:
+            path = os.path.join(ckpt_dir, f'weeddet_epoch{epoch}.pth')
+            state_dict = ema.ema.state_dict() if ema is not None else model.state_dict()
+            torch.save({'epoch': epoch, 'state_dict': state_dict,
+                        'raw_state_dict': model.state_dict(),
+                        'loss': avg_loss, 'config': config,
+                        'scaler': scaler.state_dict() if use_amp else None}, path)
+            print(f"  Checkpoint saved  -> {path}")
+
+    print("\nTraining complete.")
+    return model

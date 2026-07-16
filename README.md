@@ -8,65 +8,56 @@
 
 ## Start here
 
-0. `TEST_LOG.md` — **one-test-at-a-time tracker with interaction analysis (CHECK BEFORE EVERY RUN)**
-1. `COCO_MIGRATION_2026-07-07.md` — V7 action log + next plan (see also `AUDIT_2026-07-09_V7.md`)
-2. `RESEARCH_PLAN_DETECTION_ACCURACY.md` — the detection-accuracy research plan + results table
-3. `AgriNav_Project_Tracker.md` — team/course tracker
-4. `MASTER_PROJECT_HISTORY.md` — full timeline (Phases 1–10)
+1. `HANDOFF_2026-07-16.md` — full session handoff: everything done, known issues, next steps
+2. `TEST_LOG.md` — one-test-at-a-time tracker with verdicts T0–T7c (CHECK BEFORE EVERY RUN)
+3. `AUDIT_2026-07-09_V7.md` — pipeline audit + cleared-suspects list (don't re-investigate those)
+4. `RESEARCH_FORGETTING_DEFENSES.md` — literature recipe behind the frozen-backbone approach
+5. `RESEARCH_PLAN_DETECTION_ACCURACY.md` — protocol + Part C results table
 
-## Folder structure
+## Folder structure (cleaned 2026-07-16)
 
 ```
 agrinav_full/
 ├── README.md                          ← you are here
-├── COCO_MIGRATION_2026-07-07.md       ← action log + next plan (READ FIRST)
+├── HANDOFF_2026-07-16.md              ← session handoff (READ FIRST)
+├── TEST_LOG.md                        ← test protocol + verdicts
+├── AUDIT_2026-07-09_V7.md             ← pipeline audit
+├── RESEARCH_FORGETTING_DEFENSES.md    ← forgetting-defense literature note
 ├── RESEARCH_PLAN_DETECTION_ACCURACY.md
-├── AgriNav_Project_Tracker.md
-├── MASTER_PROJECT_HISTORY.md
+├── COCO_MIGRATION_2026-07-07.md       ← V7-era action log
+├── AgriNav_Project_Tracker.md         ← team/course tracker
+├── MASTER_PROJECT_HISTORY.md          ← full timeline (Phases 1–10)
 │
-├── data/                              ← VOC-era scripts (split_coco.py NOT yet in repo — see below)
-├── models/
-│   ├── weeddet_v6b.py                 ← CURRENT model file (synced from Drive 2026-07-09, has cls_hard_target fix)
-│   └── weeddet_for_VSCode.py          ← legacy
-├── training/
-│   ├── riceseg_pretrain.py            ← RiceSEG → WeedDet backbone pretraining (synced 2026-07-09)
-│   └── colab_weeddet_train.py         ← legacy
 ├── active/
-│   ├── ACTIVE_NOTES.md                ← what to do next
-│   └── (V5-era notebooks — the live V7 notebook is on Colab, see Drive links below)
-├── archive/                           ← v1–v4 iterations
+│   ├── weeddet_trainingV7_1_T1.ipynb  ← THE training notebook (currently configured T7d)
+│   └── ACTIVE_NOTES.md                ← what to do next
+├── models/
+│   └── weeddet_v6b.py                 ← CURRENT model (T1 fix: atss_all_neg; cls_hard_target)
+├── training/
+│   └── riceseg_pretrain.py            ← RiceSEG → WeedDet backbone pretraining
+├── data/
+│   ├── auto_annotate.py
+│   ├── rice_training_curated/         ← 245 curated RiceSEG images (aerial 95 / front 150)
+│   │   ├── manifest.csv               ← per-image QA scores
+│   │   └── AUDIT_REPORT.md            ← curation method + site table
+│   └── rice_training_curated*.zip     ← source archives (git-ignored; possible duplicates — verify & dedupe)
+├── inference/                         ← inference_rice.py
 ├── paper/                             ← IEEE paper revision docs
-└── drive_links/GOOGLE_DRIVE_INVENTORY.md
+├── drive_links/GOOGLE_DRIVE_INVENTORY.md
+└── archive/
+    ├── v1_baseline_retinanet/         ← Kaggle baseline (+ its notebook)
+    ├── v2–v4 snapshots/
+    ├── v5_era/                        ← ALL v5-era code + notebooks (moved 2026-07-16)
+    └── voc_era/                       ← VOC-era data scripts (coco_to_voc, step1/2)
 ```
 
-⚠️ **Not yet in this repo** (add when convenient): `data/split_coco.py`, `run_pretrain.ipynb`,
-`weeddet_trainingV7_coco.ipynb` (live on Colab, changes with each run), `USING_RICESEG_BACKBONE.md`.
-
-## Pipeline (all fresh-run)
-
-1. `split_coco.py` → leakage-safe COCO train/valid/test (done → `rice_detection_coco_split.zip` on Drive)
-2. `run_pretrain.ipynb` (Drive) → `riceseg_backbone.pth` (done, 94 MB)
-3. `weeddet_trainingV7_coco.ipynb` (Colab), `BACKBONE_INIT ∈ {scratch, riceseg, imagenet}` → train + COCO eval
-
-## Quick status (2026-07-09)
+## Quick status (2026-07-16)
 
 | Item | Status |
 |---|---|
-| COCO leakage-safe split (1079/134/134) | ✅ delivered |
-| RiceSEG backbone pretrained + exported | ✅ `riceseg_backbone.pth` |
-| VFL classification-target bug | ✅ diagnosed + fixed (`cls_hard_target=True`), validated on overfit-16 (AP@50 0.60) |
-| V7 riceseg full runs | ❌ both failed (0.0088 pre-fix; ~0.000 post-fix with frozen det/img) — EMA/grad-clip under suspicion |
-| Scratch control on COCO split | ⚠️ NOT RUN — blocking; this is the real baseline |
-| imagenet ablation, test-split eval, YOLOv8s baseline | ⚠️ pending |
-| Paper: same-distribution AP@0.5/0.75 | ⚠️ still the blocking item |
-
-## Google Drive (active folders)
-
-| Folder | Path | Contents |
-|---|---|---|
-| v2 | `MyDrive/weeddet_v2_checkpoints/` | `weeddet_v6b.py` + `rice_detection_coco_split.zip` |
-| v6 | `MyDrive/weeddet_v6_checkpoints/` | `riceseg_backbone.pth` |
-| v7 | `MyDrive/weeddet_v7_checkpoints/` | V7 training checkpoints + curves |
-| pretrain | `MyDrive/riceseg_pretraining/` | `riceseg_pretrain.py`, `RiceSEG.zip`, `run_pretrain.ipynb` |
-
-See `drive_links/GOOGLE_DRIVE_INVENTORY.md` for IDs.
+| **Best stable model** | **val AP@50 0.1040 / AP@75 0.0116** — T7: frozen riceseg backbone, 20-ep anneal (`weeddet_v7_riceseg_T7_best.pth` on Drive) |
+| Scratch baseline (paper) | 0.0450 @ 20 ep (T6) → riceseg pretraining = 2.3× scratch, forgetting confirmed + defended |
+| Settled config | atss_all_neg ✓ · cls_hard_target ✓ · clip 10.0 ✓ · anchors base 6 ✓ · FREEZE_BACKBONE ✓ · fast cosine anneal ✓ |
+| Schedule question | CLOSED — long/flat schedules fail at any lr (T7b/T7c); fast anneal is the recipe |
+| **Current ceiling** | FP flood (~300 det/img) from ATSS assignment geometry → **next: T10** (per-cell candidates) then T11 (soft quality targets) |
+| Curated data | 245 RiceSEG images in `
