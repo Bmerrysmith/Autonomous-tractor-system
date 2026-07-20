@@ -19,6 +19,9 @@
 3. `active/ACTIVE_NOTES.md` — current priorities and stop conditions
 4. `TEST_LOG.md` — historical T0–T7c experiment record; reconcile it with the July 20 audit before reuse
 5. `HANDOFF_2026-07-16.md` — historical session handoff, retained for provenance
+6. `docs/research/PERCEPTION_RESEARCH_PACKAGE_2026-07-20.md` — perception-only success targets, comparable datasets, annotation stack, architecture decision, and controlled RiceSEG study
+7. `docs/annotation_guide.md` — canonical crop-protection/weed-target mask rules and human-review gates
+8. `docs/research/PERCEPTION_ACCEPTANCE_MATRIX_2026-07-20.md` — extracted requirements, evidence status, unresolved decisions, and exact go/no-go gates
 
 ## Folder structure (recovered 2026-07-20)
 
