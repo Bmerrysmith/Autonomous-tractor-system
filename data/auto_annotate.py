@@ -6,6 +6,10 @@ PASCAL VOC XML bounding box annotations for unannotated rice field images.
 
 Replaces manual annotation via LabelImg for large datasets.
 
+IMPORTANT: Generated boxes are annotation proposals, not verified ground truth.
+Every proposal must be reviewed by a human and pass dataset QA before use in
+training, evaluation, or any reported result.
+
 Usage:
     # Annotate all images in a folder
     python auto_annotate.py --images /path/to/images --output /path/to/annotations
@@ -34,6 +38,7 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from pathlib import Path
 
+import torch
 from PIL import Image
 
 
@@ -45,6 +50,10 @@ def load_grounding_dino(device='cuda'):
     Falls back to CPU automatically if no GPU.
     """
     from transformers import pipeline
+
+    if device == 'cuda' and not torch.cuda.is_available():
+        print("CUDA is unavailable; falling back to CPU.")
+        device = 'cpu'
 
     print("Loading Grounding DINO... (first run downloads ~700MB model)")
     pipe = pipeline(
@@ -75,7 +84,8 @@ def save_pascal_voc_xml(image_path, boxes, labels, img_w, img_h, output_dir):
     ann = ET.Element('annotation')
     ET.SubElement(ann, 'folder').text   = 'images'
     ET.SubElement(ann, 'filename').text = Path(image_path).name
-    ET.SubElement(ann, 'path').text     = str(image_path)
+    # Keep annotations portable and avoid leaking a contributor's local path.
+    ET.SubElement(ann, 'path').text     = Path(image_path).name
 
     src = ET.SubElement(ann, 'source')
     ET.SubElement(src, 'database').text = 'GroundingDINO-AutoAnnotated'
