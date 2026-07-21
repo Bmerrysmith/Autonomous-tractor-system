@@ -23,7 +23,8 @@
 | **Authoritative audit + roadmap** | `docs/audits/2026-07-20/` | the source of truth |
 | **Fix log (what's done)** | `docs/audits/2026-07-20/PHASE1_TRANSFER_LEARNING_FIXLOG_2026-07-20.md` | ✅ |
 | **Data locations** | `docs/DATA_ORGANIZATION.md` | how data is arranged |
-| **Historical / do-not-use code** | `archive/`, old notebooks | quarantine |
+| **Historical / do-not-use code** | `_archive/` (see its README) | quarantine (recoverable) |
+| **Consolidated data** (outside repo) | `~/agrinav_data/` (`archives/ RiceSEG/ derived/ out/`) | see `docs/DATA_ORGANIZATION.md` |
 
 ---
 

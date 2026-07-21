@@ -14,5 +14,6 @@ A replacement runtime must not be added until it has:
 - independent safety vetoes and a tested decision schema;
 - export-parity, latency, geometry, and fail-closed tests from the July 20 roadmap.
 
-The old implementation remains recoverable from Git history for audit purposes. It must not be
-copied into active code or connected to an actuator.
+The old implementation has been moved to `../_archive/unsafe_inference/inference_rice.py`
+(and remains in Git history) for audit purposes only. It must not be copied into active code
+or connected to an actuator.
