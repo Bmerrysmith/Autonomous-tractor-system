@@ -699,6 +699,16 @@ Make every pixel/label transform, assignment, loss, evaluator, and checkpoint op
 
 ### Required code changes
 
+> **STATUS 2026-07-21 — partially complete.** The confirmed geometry/assignment
+> defects are fixed and tested in `models/weeddet_v6b.py`: **P0-1** translation
+> direction, **P1-10** label/box keep-mask alignment, **P1-8** exact letterbox
+> x/y scales, **P1-3** forced-positive GT orphaning, **P1-2** ATSS spatial
+> diversity, **P1-1** truthful loss naming, **P1-9** ImageNet fail-closed.
+> See [`PHASE2_DETECTOR_FIXLOG_2026-07-21.md`](PHASE2_DETECTOR_FIXLOG_2026-07-21.md).
+> **Still open:** Python NMS (P1-5), anchor volume (P1-4), one canonical
+> postprocessing path (P1-6), regression balance (P1-7), and the standard COCO
+> evaluator protocol. T7d remains invalid as a baseline.
+
 | Area/path | Current problem | Required change | Required proof |
 |---|---|---|---|
 | `models/weeddet_v6b.py::_augment` | PIL affine sampling moves pixels opposite the box update | Replace with `torchvision.transforms.v2` TVTensors or Albumentations joint transforms; carry image, boxes, masks, labels together | synthetic colored rectangle remains aligned after ±x/±y translations; centroid and box edges within 1 px |
