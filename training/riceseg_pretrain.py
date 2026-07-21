@@ -96,23 +96,106 @@ def export_backbone(model, path, include_fpn=False):
     return sd
 
 
-def load_riceseg_backbone(weeddet_model, ckpt_path, verbose=True):
+def sha256_file(path, chunk_size=1024 * 1024):
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for chunk in iter(lambda: stream.read(chunk_size), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_commit(repo_hint):
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ['git', '-C', str(repo_hint), 'rev-parse', 'HEAD'],
+            stderr=subprocess.DEVNULL)
+        return out.decode().strip()
+    except Exception:
+        return None
+
+
+def _env_versions():
+    import platform
+    versions = {'python': platform.python_version(), 'torch': torch.__version__,
+                'numpy': np.__version__}
+    try:
+        import torchvision
+        versions['torchvision'] = torchvision.__version__
+    except Exception:
+        pass
+    return versions
+
+
+def write_run_manifest(path, manifest):
+    """Emit one immutable JSON run record. The audit found runs were identified
+    only by mutable notebook/Drive paths with no code/data/env hashes
+    (deployment roadmap Gate 1, "Every run must record")."""
+    import json
+    Path(path).write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding='utf-8')
+    print(f'[manifest] {path}')
+
+
+def save_full_checkpoint(path, model, optimizer, scheduler, epoch, best_miou,
+                         config, history):
+    """Save a resumable segmentation checkpoint alongside the exported backbone
+    (deployment roadmap Gate 4, RiceSEG repair #7). Distinct from the
+    backbone-only export consumed by WeedDet."""
+    torch.save({
+        'schema_version': 'agrinav.riceseg_pretrain.fullckpt.v1',
+        'model_state': model.state_dict(),
+        'optimizer_state': optimizer.state_dict(),
+        'scheduler_state': scheduler.state_dict(),
+        'epoch': epoch,
+        'best_miou': best_miou,
+        'config': config,
+        'history': history,
+        'rng': {
+            'python': random.getstate(),
+            'numpy': np.random.get_state(),
+            'torch': torch.get_rng_state(),
+        },
+    }, path)
+    print(f'[checkpoint] full resumable state -> {path}')
+
+
+def load_riceseg_backbone(weeddet_model, ckpt_path, verbose=True, require_fpn=False):
     """Drop-in replacement for wd.load_imagenet_backbone — fills the WHOLE
     backbone (stem + layer1.0 included). Keep all BN trainable afterwards
-    (or freeze ALL with freeze_backbone_bn) — never wd.apply_bn_policy."""
+    (or freeze ALL with freeze_backbone_bn) — never wd.apply_bn_policy.
+
+    Fails closed: the checkpoint must cover EVERY expected backbone tensor
+    (optionally fpn.* too) with a matching shape. A partial or shape-mismatched
+    load raises instead of silently training from a mostly-random backbone
+    (deep audit 2026-07-20, Section 9.4, "partial validation of loaded weights").
+    """
     sd = torch.load(ckpt_path, map_location='cpu')
     sd = sd.get('state_dict', sd)
     model_sd = weeddet_model.state_dict()
-    loadable = {k: v for k, v in sd.items()
-                if k in model_sd and model_sd[k].shape == v.shape}
+    expected = {k for k in model_sd if k.startswith('backbone.')}
+    if require_fpn:
+        expected |= {k for k in model_sd if k.startswith('fpn.')}
+    loadable, shape_mismatch = {}, []
+    for k in sorted(expected):
+        if k in sd:
+            if tuple(sd[k].shape) == tuple(model_sd[k].shape):
+                loadable[k] = sd[k]
+            else:
+                shape_mismatch.append((k, tuple(sd[k].shape), tuple(model_sd[k].shape)))
+    missing = sorted(expected - set(loadable) - {k for k, *_ in shape_mismatch})
+    if missing or shape_mismatch:
+        raise ValueError(
+            f'riceseg load is incomplete: {len(loadable)}/{len(expected)} expected '
+            f'tensors matched; missing={missing[:6]}'
+            f"{'...' if len(missing) > 6 else ''}; "
+            f'shape_mismatch={shape_mismatch[:3]}. Do NOT train from this state.')
     weeddet_model.load_state_dict(loadable, strict=False)
-    n_backbone = sum(1 for k in model_sd if k.startswith('backbone.'))
+    unexpected = sorted(set(sd) - set(model_sd))
     if verbose:
-        print(f'[riceseg] loaded {len(loadable)} tensors '
-              f'({sum(1 for k in loadable if k.startswith("backbone."))}/{n_backbone} backbone)')
-    assert len(loadable) > 150, (
-        f'riceseg load looks broken — only {len(loadable)} tensors matched. '
-        'Do NOT train from this state.')
+        n_backbone = sum(1 for k in loadable if k.startswith('backbone.'))
+        print(f'[riceseg] loaded {len(loadable)}/{len(expected)} expected tensors '
+              f'({n_backbone} backbone); {len(unexpected)} checkpoint tensors ignored')
     return len(loadable)
 
 
@@ -130,9 +213,39 @@ def freeze_backbone_bn(weeddet_model):
 
 
 # ================================================================ data
+def parse_country_site(rgb_path, root):
+    """Country/site for a RiceSEG rgb (or label) path.
+
+    The supplied archive extracts to a single dataset wrapper directory that
+    then holds one directory per country, e.g.
+
+        <root>/global rice segmentation/China/GD/rgb/<tile>.jpg     (has site)
+        <root>/global rice segmentation/India/rgb/<tile>.jpg        (no site)
+
+    so relative to ``root`` the wrapper is ``parts[0]`` and the country is the
+    component immediately after it. The previous implementation used
+    ``parts[0]`` as the country and therefore labelled every tile
+    "global rice segmentation", breaking country holdout and country reporting
+    (deep audit 2026-07-20, Section 9.4). This anchors on the rgb/label kind
+    directory instead — mirroring scripts/build_annotation_pilot so both tools
+    agree on country/site — and returns ``(country, site_or_None)``.
+    """
+    parts = Path(rgb_path).relative_to(root).parts
+    kind_index = next(
+        (i for i, part in enumerate(parts) if part.lower() in {'rgb', 'label'}),
+        None,
+    )
+    if kind_index is None or kind_index < 2:
+        return 'unknown', None
+    if kind_index == 2:
+        return parts[1], None
+    return parts[kind_index - 2], parts[kind_index - 1]
+
+
 def scan_riceseg(data_root):
-    """Find (rgb, label, country, source_id) tuples. Layout: any depth of
-    <country>/.../rgb/<tile>.png with sibling label/ dir holding same-name mask."""
+    """Find (rgb, label, country, site, source) tuples. Layout: any depth of
+    <wrapper>/<country>[/<site>]/rgb/<tile> with a sibling label/ dir holding
+    the same-name mask. Country/site come from ``parse_country_site``."""
     root = Path(data_root)
     pairs = []
     for rgb in sorted(root.glob('**/rgb/*')):
@@ -146,12 +259,14 @@ def scan_riceseg(data_root):
                 break
         if lab is None:
             continue
-        rel = rgb.relative_to(root)
-        country = rel.parts[0] if len(rel.parts) > 3 else 'unknown'
+        country, site = parse_country_site(rgb, root)
         m = re.split(r'_subset', rgb.stem, maxsplit=1)
-        source_id = f'{country}/{m[0]}'
+        # Group by country/site/source-photo so overlapping tiles from one
+        # photo never cross a split even when two sites reuse a photo stem.
+        group_prefix = f'{country}/{site}' if site else country
+        source_id = f'{group_prefix}/{m[0]}'
         pairs.append({'rgb': str(rgb), 'label': str(lab),
-                      'country': country, 'source': source_id})
+                      'country': country, 'site': site, 'source': source_id})
     if not pairs:
         raise FileNotFoundError(f'no rgb/label pairs under {data_root}')
     return pairs
@@ -203,8 +318,11 @@ def compute_class_weights(pairs, num_classes=NUM_CLASSES, max_samples=400,
 
 
 class RiceSegDataset(Dataset):
-    def __init__(self, pairs, img_size=512, augment=False):
+    def __init__(self, pairs, img_size=512, augment=False, ignore_index=None):
         self.pairs, self.img_size, self.augment = pairs, img_size, augment
+        # ignore_index: an out-of-range value (e.g. 255 void) that is permitted
+        # and preserved rather than rejected. Default None = strict.
+        self.ignore_index = ignore_index
 
     def __len__(self):
         return len(self.pairs)
@@ -222,7 +340,21 @@ class RiceSegDataset(Dataset):
             lab = lab.transpose(Image.FLIP_LEFT_RIGHT)
         x = torch.from_numpy(np.asarray(img, dtype=np.float32).transpose(2, 0, 1) / 255.0)
         x = (x - torch.tensor(IMAGENET_MEAN)[:, None, None]) / torch.tensor(IMAGENET_STD)[:, None, None]
-        y = torch.from_numpy(np.asarray(lab, dtype=np.int64).clip(0, NUM_CLASSES - 1))
+        # Validate rather than clip. The old unconditional clip silently mapped
+        # any unexpected value (e.g. a 255 void pixel) to duckweed (deep audit
+        # 2026-07-20, Section 9.4). Unknown values now fail loudly.
+        arr = np.asarray(lab, dtype=np.int64)
+        valid = (arr >= 0) & (arr < NUM_CLASSES)
+        if self.ignore_index is not None:
+            valid |= arr == self.ignore_index
+        if not valid.all():
+            bad = np.unique(arr[~valid]).tolist()
+            allowed = f'[0, {NUM_CLASSES - 1}]'
+            if self.ignore_index is not None:
+                allowed += f' or ignore_index={self.ignore_index}'
+            raise ValueError(
+                f"mask {p['label']} has values outside {allowed}: {bad}")
+        y = torch.from_numpy(arr)
         return x, y
 
 
@@ -254,10 +386,64 @@ class ConfMat:
         self.m += np.bincount(g * self.n + p, minlength=self.n ** 2).reshape(self.n, self.n)
 
     def iou(self):
+        """Per-class IoU (NaN where a class never appears in gt or pred), the
+        mean over PRESENT classes, and the explicit list of absent class names.
+        The absent list is returned so callers report dropped classes rather
+        than silently inflating mIoU via np.nanmean (deployment roadmap Gate 4,
+        RiceSEG repair #4)."""
         tp = np.diag(self.m).astype(np.float64)
         denom = self.m.sum(0) + self.m.sum(1) - tp
         iou = np.where(denom > 0, tp / np.maximum(denom, 1), np.nan)
-        return iou, np.nanmean(iou)
+        absent = [CLASS_NAMES[i] for i in range(self.n) if np.isnan(iou[i])]
+        miou = float(np.nanmean(iou)) if np.any(~np.isnan(iou)) else float('nan')
+        return iou, miou, absent
+
+
+# ================================================================ overfit gate
+def _overfit_output_path(base_out):
+    """Return an isolated temp path for the overfit sanity run so it can never
+    overwrite the production backbone (`base_out`). The audit found the notebook
+    passed the production path into the gate, so a gate-only or failed run could
+    leave an 8-image-overfit backbone at the real path (Section 9.4)."""
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix='riceseg_overfit_', suffix='.pth')
+    os.close(fd)
+    return Path(path)
+
+
+def _enforce_overfit_gate(best_miou, threshold):
+    """Fail closed if the overfit sanity run did not reach its preregistered
+    mIoU. The old gate always continued regardless of score (Section 9.4)."""
+    if best_miou < threshold:
+        raise SystemExit(
+            f'[gate] OVERFIT FAILED: best mIoU {best_miou:.4f} < threshold '
+            f'{threshold:.4f}. The preprocessing/model/loss path is broken; '
+            'fix it before any full pretraining run.')
+    print(f'[gate] OVERFIT PASSED: best mIoU {best_miou:.4f} >= {threshold:.4f}')
+
+
+def _stratified_overfit_subset(pairs, n, num_classes=NUM_CLASSES, scan_cap=512):
+    """Pick ~n tiles that together cover all classes so the overfit mIoU is a
+    stable six-class score. The audit noted the first 8 sorted tiles contain no
+    duckweed, so np.nanmean silently drops that class and inflates the gate
+    (Section 9.4). Best-effort within a bounded scan."""
+    from PIL import Image
+    chosen, seen = [], set()
+    for p in pairs[:scan_cap]:
+        if len(chosen) >= n and seen >= set(range(num_classes)):
+            break
+        present = set(np.unique(np.asarray(Image.open(p['label']))).tolist())
+        if (present - seen) or len(chosen) < n:
+            chosen.append(p)
+            seen |= present
+        if len(chosen) >= n and seen >= set(range(num_classes)):
+            break
+    for p in pairs:
+        if len(chosen) >= n:
+            break
+        if p not in chosen:
+            chosen.append(p)
+    return chosen[:max(n, len(chosen)) if len(chosen) < n else n]
 
 
 # ================================================================ gates
@@ -299,6 +485,9 @@ def main():
     ap.add_argument('--overfit', type=int, default=0,
                     help='sanity gate: train on N tiles, expect high mIoU '
                          '(use --batch-size 4 with --overfit 8)')
+    ap.add_argument('--overfit-min-miou', type=float, default=0.80,
+                    help='preregistered mIoU the overfit gate must reach or the '
+                         'run fails (exit 2)')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--seed', type=int, default=42)
     args = ap.parse_args()
@@ -313,17 +502,31 @@ def main():
     print(f'[setup] device={device}')
 
     pairs = scan_riceseg(args.data_root)
-    print(f'[data] {len(pairs)} tiles | countries: '
-          f'{sorted({p["country"] for p in pairs})}')
+    countries = sorted({p['country'] for p in pairs})
+    print(f'[data] {len(pairs)} tiles | countries: {countries}')
+
+    # Fail loudly if a country holdout names a country the archive does not
+    # contain (roadmap Gate 4, RiceSEG repair #2). The old parser labelled every
+    # tile "global rice segmentation", so any real country silently held out 0.
+    if args.holdout_country and args.holdout_country.lower() not in {c.lower() for c in countries}:
+        raise SystemExit(
+            f'--holdout-country {args.holdout_country!r} is not present; '
+            f'available countries: {countries}')
 
     if args.overfit:
-        train_p = val_p = pairs[:args.overfit]
+        # Stratified so all six classes appear (else duckweed NaN inflates mIoU),
+        # and exported to an isolated temp path that can never clobber args.out.
+        train_p = val_p = _stratified_overfit_subset(pairs, args.overfit)
         epochs = max(args.epochs, 60)
-        print(f'[gate] OVERFIT-{args.overfit}: must reach high mIoU or something is broken')
+        out_path = _overfit_output_path(args.out)
+        print(f'[gate] OVERFIT-{args.overfit}: must reach mIoU >= '
+              f'{args.overfit_min_miou:.2f}; isolated export -> {out_path} '
+              f'(production path {args.out} untouched)')
     else:
         train_p, val_p = split_pairs(pairs, args.val_ratio, args.seed,
                                      args.holdout_country)
         epochs = args.epochs
+        out_path = Path(args.out)
         print(f'[split] train {len(train_p)} / val {len(val_p)} '
               f'(group-aware by source photo; 0 source overlap)')
 
@@ -335,15 +538,33 @@ def main():
                     batch_size=args.batch_size, shuffle=False, num_workers=2)
 
     model = RiceSegModel().to(device)
+    imagenet_coverage = None
     if not args.no_imagenet:
-        wd.load_imagenet_backbone(model)   # warm-start the compatible 92%
+        # Fail closed on a silent ImageNet miss: a torchvision fetch failure
+        # returns (0, 0) and would otherwise turn a labelled "ImageNet->RiceSEG"
+        # run into an unlabelled scratch run (audit P1-9 / roadmap repair #8).
+        n_loaded, n_missed = wd.load_imagenet_backbone(model)
+        n_backbone = sum(1 for k in model.state_dict() if k.startswith('backbone.'))
+        imagenet_coverage = {'loaded': int(n_loaded), 'missed': int(n_missed),
+                             'backbone_total': int(n_backbone)}
+        if n_loaded == 0:
+            raise SystemExit(
+                '[imagenet] load returned 0 tensors — refusing to run a scratch '
+                'job mislabelled as ImageNet->RiceSEG. Use --no-imagenet to run '
+                'true scratch, or fix connectivity/weights.')
+        print(f'[imagenet] warm-started {n_loaded}/{n_backbone} backbone tensors '
+              f'(the custom stem + layer1.0 stay random by design)')
         # NOTE: no BN freezing here — the whole point is retraining ALL BN in-domain.
+    else:
+        print('[imagenet] skipped (--no-imagenet): true random->RiceSEG condition')
     crit = SegLoss(weights)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=args.lr * 0.01)
     scaler = torch.cuda.amp.GradScaler(enabled=device.type == 'cuda')
 
     best = -1.0
+    best_epoch, best_iou_vec, best_absent = 0, None, []
+    history = []
     for ep in range(1, epochs + 1):
         model.train()
         tot = n = 0
@@ -363,16 +584,71 @@ def main():
             for x, y in vl:
                 pred = model(x.to(device)).argmax(1).cpu().numpy()
                 cm.update(pred, y.numpy())
-        iou, miou = cm.iou()
-        line = (f'epoch {ep:02d}/{epochs}  loss={tot/max(n,1):.4f}  mIoU={miou:.4f}  '
+        iou, miou, absent = cm.iou()
+        avg_loss = tot / max(n, 1)
+        history.append({'epoch': ep, 'loss': avg_loss, 'miou': miou,
+                        'per_class_iou': {nm: (None if np.isnan(v) else float(v))
+                                          for nm, v in zip(CLASS_NAMES, iou)},
+                        'absent_classes': absent})
+        line = (f'epoch {ep:02d}/{epochs}  loss={avg_loss:.4f}  mIoU={miou:.4f}  '
                 + ' '.join(f'{nm}={v:.2f}' for nm, v in zip(CLASS_NAMES, iou)))
+        if absent:
+            # Explicit, not silent: mIoU above is the mean over PRESENT classes.
+            line += f'  [absent: {",".join(absent)}]'
         if miou > best:
-            best = miou
-            export_backbone(model, args.out, include_fpn=args.include_fpn)
+            best, best_epoch, best_iou_vec, best_absent = miou, ep, iou, absent
+            export_backbone(model, out_path, include_fpn=args.include_fpn)
+            if not args.overfit:
+                save_full_checkpoint(
+                    Path(str(out_path) + '.fullckpt.pth'), model, opt, sched,
+                    ep, best, vars(args), history)
             line += '  * exported'
         print(line, flush=True)
 
-    print(f'\nDone. Best mIoU {best:.4f} -> {args.out}')
+    if args.overfit:
+        _enforce_overfit_gate(best, args.overfit_min_miou)
+        print(f'\nOverfit sanity artifact (not for reuse): {out_path}')
+        return
+
+    # Immutable run record beside the exported backbone (roadmap Gate 1/Gate 4 #7).
+    manifest = {
+        'schema_version': 'agrinav.riceseg_pretrain.run.v1',
+        'seed': args.seed,
+        'git_commit': _git_commit(Path(__file__).resolve().parent),
+        'environment': _env_versions(),
+        'device': str(device),
+        'config': vars(args),
+        'data': {
+            'data_root': str(args.data_root),
+            'tiles': len(pairs),
+            'countries': countries,
+            'train_tiles': len(train_p),
+            'val_tiles': len(val_p),
+            'holdout_country': args.holdout_country,
+        },
+        'imagenet_coverage': imagenet_coverage,
+        'best': {
+            'epoch': best_epoch,
+            'miou_present_classes': best,
+            'per_class_iou': {nm: (None if best_iou_vec is None or np.isnan(v) else float(v))
+                              for nm, v in zip(CLASS_NAMES, best_iou_vec if best_iou_vec is not None
+                                               else [np.nan] * NUM_CLASSES)},
+            'absent_classes': best_absent,
+        },
+        'history': history,
+        'backbone_export': {
+            'path': str(out_path),
+            'sha256': sha256_file(out_path),
+            'include_fpn': args.include_fpn,
+        },
+        'full_checkpoint': str(out_path) + '.fullckpt.pth',
+    }
+    write_run_manifest(str(out_path) + '.manifest.json', manifest)
+
+    print(f'\nDone. Best mIoU {best:.4f} at epoch {best_epoch} -> {out_path}')
+    if best_absent:
+        print(f'[warn] classes absent from validation at best epoch: {best_absent} '
+              '(mIoU is over present classes only)')
     print('Load into WeedDet with load_riceseg_backbone(); keep BN trainable '
           '(or freeze_backbone_bn) — NEVER apply_bn_policy.')
 

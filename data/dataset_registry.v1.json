@@ -202,6 +202,35 @@
       "group_key": "capture session/view sequence",
       "recommended_role": "Excellent geometry match if explicit access and rights are granted.",
       "do_not": "Do not treat paper availability as dataset permission."
+    },
+    {
+      "id": "paddy-6species-masks-frontiers-2025",
+      "rank": null,
+      "status": "request-only-contact-authors",
+      "paper": "https://www.frontiersin.org/journals/plant-science/articles/10.3389/fpls.2025.1703811/full",
+      "license": "Not stated in the article; data statement directs inquiries to the corresponding authors.",
+      "domain": "Rice paddy weeds captured in paired laboratory and field subsets.",
+      "size": "3,800 images (1,800 laboratory, 1,800-2,000 field) with pixel-level instance masks over six paddy weed species.",
+      "geometry": "instance masks (LabelMe)",
+      "group_key": "subset (lab/field) plus capture session",
+      "species": "barnyard grass (Echinochloa crus-galli), purple nutsedge (Cyperus rotundus), eclipta (Eclipta prostrata), Cardamine occulta, alligator weed (Alternanthera philoxeroides), water dropwort (Oenanthe javanica)",
+      "recommended_role": "Highest-match paddy weed mask source located; ideal independent validation/test for unseen-site weed segmentation if authors grant access.",
+      "do_not": "Do not treat paper availability as dataset permission; these six-species masks are request-only and their license is unrecorded."
+    },
+    {
+      "id": "guo-uav-rice-barnyardgrass-2024",
+      "rank": null,
+      "status": "request-only-contact-authors",
+      "paper": "https://plantmethods.biomedcentral.com/articles/10.1186/s13007-024-01232-0",
+      "doi": "10.1186/s13007-024-01232-0",
+      "license": "Not stated; the data-availability statement declares no datasets generated or analysed, so access requires contacting the authors.",
+      "domain": "UAV remote-sensing imagery of rice paddy (Shenyang Agricultural University).",
+      "size": "3,094 tiles segmented from 171 original UAV images; boxed barnyard grass (single plants and continuous patches), rice, and field ridges.",
+      "geometry": "bounding boxes (Labelme)",
+      "group_key": "original UAV image before tiling",
+      "species": "barnyard grass (Echinochloa crus-galli)",
+      "recommended_role": "High-match barnyard-grass box source for the dominant rice weed; contact target only.",
+      "do_not": "Do not split tiles from one UAV image across partitions, and do not treat paper availability as dataset permission."
     }
   ]
 }

@@ -720,14 +720,21 @@ Make every pixel/label transform, assignment, loss, evaluator, and checkpoint op
 
 ### RiceSEG-specific repairs
 
-1. Parse country and source-photo IDs from the actual supplied layout; assert expected counts for all five countries.
-2. Make country/site holdout validation fail if its requested group is empty or unknown.
-3. Build an overfit fixture that contains every class being evaluated, especially weeds and duckweed.
-4. Compute a fixed-class metric. Do not increase mIoU by silently dropping absent classes; report absent classes explicitly.
-5. Write diagnostic checkpoints to a temporary run directory, never the production backbone name.
-6. Enforce the overfit threshold programmatically and return a non-zero exit status when it fails.
-7. Save full segmentation checkpoints and a separately hashed backbone export.
-8. Log the exact ImageNet initialization coverage and the incremental RiceSEG stage.
+> **STATUS 2026-07-20: all 8 complete** in `training/riceseg_pretrain.py`, test-first
+> (52-test suite green; `--self-test` passes). The RiceSEG backbone pretraining —
+> the project's first batch of training — is now correct and reproducible. See
+> [`PHASE1_TRANSFER_LEARNING_FIXLOG_2026-07-20.md`](PHASE1_TRANSFER_LEARNING_FIXLOG_2026-07-20.md).
+> The **detector half of Gate 4** (`models/weeddet_v6b.py`: translation aug, ATSS,
+> VFL, letterbox, NMS, evaluator) is still open.
+
+1. ✅ Parse country and source-photo IDs from the actual supplied layout; assert expected counts for all five countries. — `parse_country_site()`; verified China 1120 / India 600 / Japan 704 / Philippines 600 / Tanzania 54.
+2. ✅ Make country/site holdout validation fail if its requested group is empty or unknown. — `SystemExit` on unknown country; empty holdout asserted.
+3. ✅ Build an overfit fixture that contains every class being evaluated, especially weeds and duckweed. — `_stratified_overfit_subset()`.
+4. ✅ Compute a fixed-class metric. Do not increase mIoU by silently dropping absent classes; report absent classes explicitly. — `ConfMat.iou()` returns absent-class list; printed as `[absent: …]`.
+5. ✅ Write diagnostic checkpoints to a temporary run directory, never the production backbone name. — `_overfit_output_path()`.
+6. ✅ Enforce the overfit threshold programmatically and return a non-zero exit status when it fails. — `_enforce_overfit_gate()` (`--overfit-min-miou`, default 0.80).
+7. ✅ Save full segmentation checkpoints and a separately hashed backbone export. — `save_full_checkpoint()` + `write_run_manifest()` with `sha256_file()`.
+8. ✅ Log the exact ImageNet initialization coverage and the incremental RiceSEG stage. — coverage recorded in the run manifest; fails closed on a 0-tensor ImageNet load (P1-9).
 
 ### Gate-4 pass condition
 
