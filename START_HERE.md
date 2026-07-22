@@ -13,10 +13,10 @@
 
 | Area | Path | Status |
 |---|---|---|
-| **Pretraining code** (first training) | `training/riceseg_pretrain.py` | ✅ fixed + tested |
+| **Pretraining code** (first training) | `src/agrinav/training/riceseg_pretrain.py` | ✅ fixed + tested |
 | **Colab pretraining notebook** | `notebooks/riceseg_pretrain_colab.ipynb` | ✅ run this on GPU |
-| **Detector model** | `models/weeddet_v6b.py` | ⚠️ has open correctness bugs |
-| **Data pipeline (masks→polygons, split)** | `scripts/*.py` | ✅ built + tested |
+| **Detector model** | `src/agrinav/models/weeddet_v6b.py` | ⚠️ has open correctness bugs |
+| **Data pipeline (masks→polygons, split)** | `src/agrinav/data/*.py` | ✅ built + tested |
 | **Detector dataset card** | `docs/detector_dataset_card.md` | ✅ read before detector training |
 | **The split membership** | `data/manifests/detector_split_v1.json` | ✅ immutable record |
 | **Results log** (paste run outputs here) | `docs/research/RICESEG_PRETRAIN_RESULTS.md` | fill after each run |
@@ -34,11 +34,11 @@
 
 **On GPU (recommended):** open `notebooks/riceseg_pretrain_colab.ipynb` in Colab, set Runtime→GPU, put `RiceSEG.zip` in `MyDrive/agrinav_data/`, run all cells. ~30–60 min. It writes `riceseg_backbone.pth` + `manifest.json` to Drive.
 
-**Locally (CPU is slow):**
+**Locally (CPU is slow):** first install the package — `pip install -e ".[train]"` (see README "Setup").
 ```powershell
-python training/riceseg_pretrain.py --self-test          # contract check
-python training/riceseg_pretrain.py --data-root <RiceSEG_folder> --overfit 8 --batch-size 4   # sanity gate
-python training/riceseg_pretrain.py --data-root <RiceSEG_folder> --epochs 30 --img-size 512 --out <out>/riceseg_backbone.pth
+python -m agrinav.training.riceseg_pretrain --self-test          # contract check
+python -m agrinav.training.riceseg_pretrain --data-root <RiceSEG_folder> --overfit 8 --batch-size 4   # sanity gate
+python -m agrinav.training.riceseg_pretrain --data-root <RiceSEG_folder> --epochs 30 --img-size 512 --out <out>/riceseg_backbone.pth
 ```
 `<RiceSEG_folder>` is the folder that **contains** `global rice segmentation/`.
 
@@ -50,7 +50,7 @@ See `docs/detector_dataset_card.md`. It produced a **weed-rich, leakage-free** i
 
 ### 3. (Later) Detector training — blocked until code fixes
 
-Do **not** train the detector yet. `models/weeddet_v6b.py` still has the audit's open bugs (translation-augmentation label corruption, ATSS, "Varifocal Loss" misnaming, evaluator). Fix those (audit §5–6, roadmap Gate 4) before any detector run.
+Do **not** train the detector yet. `src/agrinav/models/weeddet_v6b.py` still has the audit's open bugs (translation-augmentation label corruption, ATSS, "Varifocal Loss" misnaming, evaluator). Fix those (audit §5–6, roadmap Gate 4) before any detector run.
 
 ---
 
