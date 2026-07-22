@@ -43,7 +43,7 @@ tests inject a fake generator.
 
 Usage (real run, on a GPU box with licences accepted)::
 
-    python scripts/locateanything_to_proposals.py \
+    python -m agrinav.data.locateanything_to_proposals \
         --images-dir data/rice_training_curated/aerial \
         --model-id nvidia/LocateAnything-3B \
         --model-revision <pinned-commit-sha> \
@@ -51,7 +51,7 @@ Usage (real run, on a GPU box with licences accepted)::
 
 Contract check (no model, no network)::
 
-    python scripts/locateanything_to_proposals.py --self-test
+    python -m agrinav.data.locateanything_to_proposals --self-test
 """
 from __future__ import annotations
 
@@ -135,9 +135,7 @@ def load_generator_factory(spec: str) -> Callable[[], BoxGenerator]:
     return factory
 
 
-def default_generator_factory(
-    model_id: str, revision: str
-) -> Callable[[], BoxGenerator]:
+def default_generator_factory(model_id: str, revision: str) -> Callable[[], BoxGenerator]:
     """Real backend. Requires a GPU environment + accepted model licence.
 
     Kept behind a factory so importing this module never pulls torch or
@@ -170,9 +168,7 @@ def validate_model_revision(revision: str) -> str:
             "commit sha of the model before generating proposals."
         )
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", revision):
-        raise ProposalError(
-            f"--model-revision {revision!r} must be a 7-40 char commit sha."
-        )
+        raise ProposalError(f"--model-revision {revision!r} must be a 7-40 char commit sha.")
     return revision.lower()
 
 
@@ -223,9 +219,7 @@ def clip_box(
 
 def iter_image_paths(images_dir: Path) -> list[Path]:
     return sorted(
-        p
-        for p in images_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
+        p for p in images_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
     )
 
 
@@ -358,9 +352,7 @@ def build_proposal_doc(
             "score_threshold": score_threshold,
             "prompt_map": prompt_map,
         },
-        "categories": [
-            {"id": i, "name": n} for i, n in sorted(CANONICAL_ID_TO_LABEL.items())
-        ],
+        "categories": [{"id": i, "name": n} for i, n in sorted(CANONICAL_ID_TO_LABEL.items())],
         "images": images,
         "annotations": annotations,
     }
@@ -447,10 +439,22 @@ def _self_test() -> int:
             "capture_family": "fam1",
             "detections": [
                 {"prompt": "cultivated rice plants", "bbox": [10, 10, 20, 20], "score": 0.9},
-                {"prompt": "weeds growing among the rice plants", "bbox": [50, 50, 10, 10], "score": 0.8},
+                {
+                    "prompt": "weeds growing among the rice plants",
+                    "bbox": [50, 50, 10, 10],
+                    "score": 0.8,
+                },
                 {"prompt": "some plant", "bbox": [0, 0, 5, 5], "score": 0.99},  # unmapped
-                {"prompt": "cultivated rice plants", "bbox": [1, 1, 1, 1], "score": 0.1},  # low score
-                {"prompt": "weeds growing among the rice plants", "bbox": [200, 200, 5, 5], "score": 0.9},  # oob
+                {
+                    "prompt": "cultivated rice plants",
+                    "bbox": [1, 1, 1, 1],
+                    "score": 0.1,
+                },  # low score
+                {
+                    "prompt": "weeds growing among the rice plants",
+                    "bbox": [200, 200, 5, 5],
+                    "score": 0.9,
+                },  # oob
             ],
         },
         {
@@ -461,7 +465,11 @@ def _self_test() -> int:
             "group_id": None,
             "capture_family": None,
             "detections": [
-                {"prompt": "ambiguous vegetation that may not be rice", "bbox": [5, 5, 30, 30], "score": 0.7},
+                {
+                    "prompt": "ambiguous vegetation that may not be rice",
+                    "bbox": [5, 5, 30, 30],
+                    "score": 0.7,
+                },
             ],
         },
     ]
@@ -496,14 +504,11 @@ def _self_test() -> int:
         assert prov["prompt"] in prompt_map
 
     # Format compatibility with the downstream SAM step: the proposal doc must
-    # index cleanly in scripts/sam_box_to_mask.py. rice+weed refine; the
+    # index cleanly in agrinav/data/sam_box_to_mask.py. rice+weed refine; the
     # unknown_vegetation box is a *counted* drop there (category not in the
     # closed SAM map) — proving no silent normalisation to rice.
-    try:
-        from scripts.sam_box_to_mask import index_proposals
-    except Exception:  # pragma: no cover - path issues in some runners
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from scripts.sam_box_to_mask import index_proposals
+    from agrinav.data.sam_box_to_mask import index_proposals
+
     sam_units, sam_drops = index_proposals(doc)
     refinable = sum(len(u["boxes"]) for u in sam_units)
     assert refinable == 2, (refinable, sam_drops)  # rice + weed only

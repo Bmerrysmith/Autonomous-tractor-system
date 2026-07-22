@@ -23,7 +23,7 @@ encoded as RLE). Components below --min-area px are dropped as annotation noise,
 matching the annotation guide's 16px floor.
 
 CLI:
-    python scripts/riceseg_masks_to_coco.py \
+    python -m agrinav.data.riceseg_masks_to_coco \
         --riceseg-zip RiceSEG.zip \
         --out-json artifacts/detector_v1/riceseg_instances.coco.json
 Options: --min-area 16  --simplify-eps 0.004  --max-tiles N  --weed-only
@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import sys
 import zipfile
 from io import BytesIO
 from pathlib import Path, PurePosixPath
@@ -42,7 +41,6 @@ from pathlib import Path, PurePosixPath
 import cv2
 import numpy as np
 from PIL import Image
-
 
 # semantic mask value -> canonical ontology label id
 RICESEG_TO_CANONICAL = {1: 1, 2: 1, 3: 1, 4: 2, 5: 4}
@@ -71,8 +69,7 @@ def source_photo_id(stem: str) -> str:
     return stem.split("_subset", 1)[0]
 
 
-def mask_to_instances(mask: np.ndarray, min_area: int = 16,
-                      simplify_eps: float = 0.004):
+def mask_to_instances(mask: np.ndarray, min_area: int = 16, simplify_eps: float = 0.004):
     """Return a list of instance dicts for one semantic mask.
 
     Each dict: {category_id, segmentation:[[x,y,...]], bbox:[x,y,w,h], area}.
@@ -83,8 +80,7 @@ def mask_to_instances(mask: np.ndarray, min_area: int = 16,
         binary = np.isin(mask, cat["source_semantic"]).astype(np.uint8)
         if not binary.any():
             continue
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for contour in contours:
             area = cv2.contourArea(contour)
             if area < min_area:
@@ -95,12 +91,14 @@ def mask_to_instances(mask: np.ndarray, min_area: int = 16,
                 continue
             poly = approx.reshape(-1).astype(float).tolist()
             x, y, w, h = cv2.boundingRect(approx)
-            instances.append({
-                "category_id": cat["id"],
-                "segmentation": [poly],
-                "bbox": [float(x), float(y), float(w), float(h)],
-                "area": float(area),
-            })
+            instances.append(
+                {
+                    "category_id": cat["id"],
+                    "segmentation": [poly],
+                    "bbox": [float(x), float(y), float(w), float(h)],
+                    "area": float(area),
+                }
+            )
     return instances
 
 
@@ -117,8 +115,7 @@ def _iter_pairs(archive: zipfile.ZipFile):
             yield rgb, lab
 
 
-def build_coco(zip_path, min_area=16, simplify_eps=0.004, max_tiles=0,
-               weed_only=False):
+def build_coco(zip_path, min_area=16, simplify_eps=0.004, max_tiles=0, weed_only=False):
     zip_path = Path(zip_path)
     images, annotations = [], []
     img_id = ann_id = 0
@@ -138,26 +135,31 @@ def build_coco(zip_path, min_area=16, simplify_eps=0.004, max_tiles=0,
             rgb_bytes = archive.read(rgb)
             country, site = member_country_site(rgb)
             stem = PurePosixPath(rgb).stem
-            grp = f"{country}/{site}/{source_photo_id(stem)}" if site \
+            grp = (
+                f"{country}/{site}/{source_photo_id(stem)}"
+                if site
                 else f"{country}/{source_photo_id(stem)}"
+            )
             h, w = mask.shape[:2]
             img_id += 1
-            images.append({
-                "id": img_id,
-                "file_name": rgb,
-                "width": int(w),
-                "height": int(h),
-                "sha256": hashlib.sha256(rgb_bytes).hexdigest(),
-                "source_dataset": "riceseg",
-                "country": country,
-                "site": site,
-                "source_photo_id": source_photo_id(stem),
-                "group_id": f"riceseg:{grp}",
-                "view": None,
-                "weed_pixel_area": weed_area,
-                "annotation_origin": "riceseg_human_semantic_mask",
-                "review_status": "derived_from_human_mask",
-            })
+            images.append(
+                {
+                    "id": img_id,
+                    "file_name": rgb,
+                    "width": int(w),
+                    "height": int(h),
+                    "sha256": hashlib.sha256(rgb_bytes).hexdigest(),
+                    "source_dataset": "riceseg",
+                    "country": country,
+                    "site": site,
+                    "source_photo_id": source_photo_id(stem),
+                    "group_id": f"riceseg:{grp}",
+                    "view": None,
+                    "weed_pixel_area": weed_area,
+                    "annotation_origin": "riceseg_human_semantic_mask",
+                    "review_status": "derived_from_human_mask",
+                }
+            )
             for inst in instances:
                 ann_id += 1
                 annotations.append({"id": ann_id, "image_id": img_id, "iscrowd": 0, **inst})
@@ -172,9 +174,8 @@ def build_coco(zip_path, min_area=16, simplify_eps=0.004, max_tiles=0,
             "ontology": "data/ontology.v1.json",
             "annotation_origin": "riceseg_human_semantic_mask",
             "notes": "External contours only; interior holes not RLE-encoded. "
-                     "Valid training truth (human masks), not model proposals.",
-            "params": {"min_area": min_area, "simplify_eps": simplify_eps,
-                       "weed_only": weed_only},
+            "Valid training truth (human masks), not model proposals.",
+            "params": {"min_area": min_area, "simplify_eps": simplify_eps, "weed_only": weed_only},
         },
         "categories": [{"id": c["id"], "name": c["name"]} for c in CANONICAL_CATEGORIES],
         "images": images,
@@ -202,8 +203,9 @@ def main(argv=None):
     ap.add_argument("--weed-only", action="store_true")
     args = ap.parse_args(argv)
 
-    coco, summary = build_coco(args.riceseg_zip, args.min_area, args.simplify_eps,
-                               args.max_tiles, args.weed_only)
+    coco, summary = build_coco(
+        args.riceseg_zip, args.min_area, args.simplify_eps, args.max_tiles, args.weed_only
+    )
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
     args.out_json.write_text(json.dumps(coco), encoding="utf-8")
     print(f"Wrote {args.out_json}")

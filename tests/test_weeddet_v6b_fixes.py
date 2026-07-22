@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from models.weeddet_v6b import (
+from agrinav.models.weeddet_v6b import (
     AnchorGenerator,
     WeedDetLoss,
     letterbox_pil,
@@ -55,16 +55,14 @@ class TranslationDirectionTests(unittest.TestCase):
         boxes = torch.tensor([box], dtype=torch.float32)
         labels = torch.tensor([1], dtype=torch.int64)
 
-        out_img, out_boxes, out_labels = translate_image_and_boxes(
-            img, boxes, labels, dx=10, dy=6)
+        out_img, out_boxes, out_labels = translate_image_and_boxes(img, boxes, labels, dx=10, dy=6)
 
         content = _content_bbox(out_img)
         self.assertIsNotNone(content)
         b = out_boxes[0].tolist()
         # Content and box must agree within 1 px on every edge.
         for got, exp in zip(content, b):
-            self.assertLessEqual(abs(got - exp), 1.0,
-                                 f"content {content} vs box {b}")
+            self.assertLessEqual(abs(got - exp), 1.0, f"content {content} vs box {b}")
         # And it actually moved in the +x/+y direction.
         self.assertGreater(b[0], box[0])
         self.assertGreater(b[1], box[1])
@@ -75,14 +73,12 @@ class TranslationDirectionTests(unittest.TestCase):
         boxes = torch.tensor([box], dtype=torch.float32)
         labels = torch.tensor([1], dtype=torch.int64)
 
-        out_img, out_boxes, _ = translate_image_and_boxes(
-            img, boxes, labels, dx=-12, dy=-8)
+        out_img, out_boxes, _ = translate_image_and_boxes(img, boxes, labels, dx=-12, dy=-8)
 
         content = _content_bbox(out_img)
         b = out_boxes[0].tolist()
         for got, exp in zip(content, b):
-            self.assertLessEqual(abs(got - exp), 1.0,
-                                 f"content {content} vs box {b}")
+            self.assertLessEqual(abs(got - exp), 1.0, f"content {content} vs box {b}")
         self.assertLess(b[0], box[0])
 
 
@@ -95,11 +91,11 @@ class LabelAlignmentTests(unittest.TestCase):
         boxes = torch.tensor([[0, 10, 6, 40], [50, 50, 90, 90]], dtype=torch.float32)
         labels = torch.tensor([7, 9], dtype=torch.int64)
 
-        _, out_boxes, out_labels = translate_image_and_boxes(
-            img, boxes, labels, dx=-40, dy=0)
+        _, out_boxes, out_labels = translate_image_and_boxes(img, boxes, labels, dx=-40, dy=0)
 
-        self.assertEqual(len(out_boxes), len(out_labels),
-                         "labels must stay the same length as boxes")
+        self.assertEqual(
+            len(out_boxes), len(out_labels), "labels must stay the same length as boxes"
+        )
         # The surviving object must keep its ORIGINAL label (9), not a prefix value.
         self.assertEqual(out_labels.tolist(), [9])
 
@@ -117,11 +113,13 @@ class LetterboxTests(unittest.TestCase):
 
     def test_roundtrip_within_one_pixel_on_non_square_image(self):
         img = Image.new("RGB", (813, 477), (10, 200, 10))
-        boxes = torch.tensor([
-            [0.0, 0.0, 813.0, 477.0],
-            [100.0, 50.0, 400.0, 300.0],
-            [777.0, 400.0, 812.0, 476.0],
-        ])
+        boxes = torch.tensor(
+            [
+                [0.0, 0.0, 813.0, 477.0],
+                [100.0, 50.0, 400.0, 300.0],
+                [777.0, 400.0, 812.0, 476.0],
+            ]
+        )
         _, sx, sy, pl, pt = letterbox_pil(img, 512)
         fwd = boxes.clone()
         fwd[:, [0, 2]] = fwd[:, [0, 2]] * sx + pl
@@ -151,7 +149,7 @@ class AssignmentTests(unittest.TestCase):
         ious = torch.zeros(n_anchors, n_gt)
         ious[5, 0] = 0.9
         ious[5, 1] = 0.8
-        ious[7, 1] = 0.4          # next-best for gt 1
+        ious[7, 1] = 0.4  # next-best for gt 1
         anchors = torch.rand(n_anchors, 4)
         anchors[:, 2:] += anchors[:, :2] + 1.0
         gt = torch.tensor([[0.0, 0.0, 5.0, 5.0], [6.0, 6.0, 9.0, 9.0]])
@@ -181,15 +179,14 @@ class AssignmentTests(unittest.TestCase):
         cell_d = d[::A]
         k = min(loss.atss_topk, cell_d.numel())
         topk_cells = torch.topk(cell_d, k, largest=False).indices
-        self.assertGreater(len(set(topk_cells.tolist())), 1,
-                           "top-k must cover multiple distinct cells")
+        self.assertGreater(
+            len(set(topk_cells.tolist())), 1, "top-k must cover multiple distinct cells"
+        )
 
     def test_anchor_shape_permutation_preserves_cell_selection(self):
         """P1-2: reordering anchor shapes must not change which cells are chosen."""
         gen = AnchorGenerator(base_scale=3, strides=(4,))
-        gen_perm = AnchorGenerator(base_scale=3,
-                                   aspect_ratios=(1.0, 0.5, 0.33, 0.2),
-                                   strides=(4,))
+        gen_perm = AnchorGenerator(base_scale=3, aspect_ratios=(1.0, 0.5, 0.33, 0.2), strides=(4,))
         feat = torch.zeros(1, 1, 8, 8)
         a1 = gen.forward([feat], (32, 32))
         a2 = gen_perm.forward([feat], (32, 32))

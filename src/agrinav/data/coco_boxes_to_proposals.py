@@ -19,7 +19,7 @@ This keeps COCO in the "human masks + model proposals" workflow the user chose:
 RiceSEG/paddy are human-mask truth; COCO is a proposal pending SAM + review.
 
 CLI:
-    python scripts/coco_boxes_to_proposals.py \
+    python -m agrinav.data.coco_boxes_to_proposals \
         --coco-zip rice_detection_for_export.v1i.coco.zip \
         --out-json artifacts/detector_v1/coco_proposals_unreviewed.coco.json
 """
@@ -29,21 +29,22 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import sys
 import zipfile
 from pathlib import Path, PurePosixPath
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_annotation_pilot import detector_capture_family  # noqa: E402
+from agrinav.data.build_annotation_pilot import detector_capture_family
 
 # rice_detection category id -> ontology canonical id
-COCO_TO_CANONICAL = {1: 1, 2: 2}   # 1 rice->rice_protect, 2 weed->weed_target
+COCO_TO_CANONICAL = {1: 1, 2: 2}  # 1 rice->rice_protect, 2 weed->weed_target
 CANONICAL_NAME = {1: "rice_protect", 2: "weed_target"}
 
 
 def _find_coco_json(members):
-    cands = [m for m in members if m.endswith("_annotations.coco.json")
-             or m.endswith("annotations.coco.json")]
+    cands = [
+        m
+        for m in members
+        if m.endswith("_annotations.coco.json") or m.endswith("annotations.coco.json")
+    ]
     if not cands:
         cands = [m for m in members if m.endswith(".json")]
     if not cands:
@@ -80,47 +81,51 @@ def build_proposals(zip_path):
                     family, conf = detector_capture_family(fname)
                     img_id += 1
                     seen_files[member] = img_id
-                    images.append({
-                        "id": img_id,
-                        "file_name": member,
-                        "width": im.get("width"),
-                        "height": im.get("height"),
-                        "sha256": sha,
-                        "source_dataset": "rice_detection_coco",
-                        "group_id": f"rice_detection:{family}",
-                        "capture_family": family,
-                        "group_confidence": conf,
-                        "view": None,
-                        "original_split": str(split_dir),
-                        "split_status": "original_split_contaminated_rebuild_required",
-                        "annotation_origin": "coco_human_box_pending_sam_mask",
-                        "review_status": "unreviewed_proposal",
-                    })
+                    images.append(
+                        {
+                            "id": img_id,
+                            "file_name": member,
+                            "width": im.get("width"),
+                            "height": im.get("height"),
+                            "sha256": sha,
+                            "source_dataset": "rice_detection_coco",
+                            "group_id": f"rice_detection:{family}",
+                            "capture_family": family,
+                            "group_confidence": conf,
+                            "view": None,
+                            "original_split": str(split_dir),
+                            "split_status": "original_split_contaminated_rebuild_required",
+                            "annotation_origin": "coco_human_box_pending_sam_mask",
+                            "review_status": "unreviewed_proposal",
+                        }
+                    )
                 local_to_global[im["id"]] = seen_files[member]
             for a in doc["annotations"]:
                 cat = COCO_TO_CANONICAL.get(a["category_id"])
                 if cat is None:
                     continue
                 ann_id += 1
-                annotations.append({
-                    "id": ann_id,
-                    "image_id": local_to_global[a["image_id"]],
-                    "category_id": cat,
-                    "bbox": [float(v) for v in a["bbox"]],
-                    "segmentation": [],          # to be filled by SAM box->mask
-                    "area": float(a.get("area", a["bbox"][2] * a["bbox"][3])),
-                    "iscrowd": 0,
-                    "annotation_origin": "coco_human_box",
-                    "review_status": "unreviewed_proposal",
-                })
+                annotations.append(
+                    {
+                        "id": ann_id,
+                        "image_id": local_to_global[a["image_id"]],
+                        "category_id": cat,
+                        "bbox": [float(v) for v in a["bbox"]],
+                        "segmentation": [],  # to be filled by SAM box->mask
+                        "area": float(a.get("area", a["bbox"][2] * a["bbox"][3])),
+                        "iscrowd": 0,
+                        "annotation_origin": "coco_human_box",
+                        "review_status": "unreviewed_proposal",
+                    }
+                )
     coco = {
         "info": {
             "description": "rice_detection COCO boxes as UNREVIEWED proposals",
             "ontology": "data/ontology.v1.json",
             "WARNING": "NOT training truth. Boxes only, no masks. Original split "
-                       "is capture-series contaminated. Refine box->mask with SAM "
-                       "(configs/annotation/pilot_v1.json), human-review in CVAT, "
-                       "then rebuild a grouped split before any training use.",
+            "is capture-series contaminated. Refine box->mask with SAM "
+            "(configs/annotation/pilot_v1.json), human-review in CVAT, "
+            "then rebuild a grouped split before any training use.",
             "source_categories": src_cats,
         },
         "categories": [{"id": i, "name": n} for i, n in CANONICAL_NAME.items()],

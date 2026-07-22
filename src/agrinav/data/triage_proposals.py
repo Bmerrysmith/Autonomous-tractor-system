@@ -59,7 +59,7 @@ presentation and ordering -- median 27 boxes per image collapsed to ~2 flagged
 objects on one screen -- and it is UNMEASURED until per-image timings exist.
 
 CLI:
-    python scripts/triage_proposals.py \
+    python -m agrinav.data.triage_proposals \
         --features artifacts/detector_v1/proposal_features_v1.jsonl \
         --calibration artifacts/detector_v1/triage_calibration_v1.json \
         --out artifacts/detector_v1/triage_queue_v1.jsonl \
@@ -99,14 +99,16 @@ BUCKETS = frozenset({BUCKET_BULK_CONFIRM, BUCKET_AUTO_REJECT, BUCKET_HUMAN_REVIE
 # Snapshot of scripts/validate_annotation_package.REVIEW_STATUSES.  The test
 # suite asserts this stays equal to the validator's own set AND that BUCKETS is
 # disjoint from it, so a bucket name can never be mistaken for a review status.
-REVIEW_STATUSES_SNAPSHOT = frozenset({
-    "unreviewed",
-    "in_review",
-    "changes_requested",
-    "accepted",
-    "adjudicated",
-    "rejected_unusable",
-})
+REVIEW_STATUSES_SNAPSHOT = frozenset(
+    {
+        "unreviewed",
+        "in_review",
+        "changes_requested",
+        "accepted",
+        "adjudicated",
+        "rejected_unusable",
+    }
+)
 
 TIER_CROSS_CLASS_INTRUSION = "T0"
 TIER_WEED_INTEGRITY = "T1"
@@ -125,11 +127,13 @@ TIERS = (
     TIER_AUDIT,
 )
 # Tiers that order by impact ALONE: cost must never deprioritise a weed.
-IMPACT_ONLY_TIERS = frozenset({
-    TIER_CROSS_CLASS_INTRUSION,
-    TIER_WEED_INTEGRITY,
-    TIER_WEED_REMAINING,
-})
+IMPACT_ONLY_TIERS = frozenset(
+    {
+        TIER_CROSS_CLASS_INTRUSION,
+        TIER_WEED_INTEGRITY,
+        TIER_WEED_REMAINING,
+    }
+)
 
 # The ONLY numeric literals in this module that participate in arithmetic on
 # feature values.  They are the endpoints of the unit interval -- not tunable
@@ -213,10 +217,19 @@ THRESHOLD_ENTRY_KEYS = (
     "bulk_confirm_enabled",
 )
 
-PLACEHOLDER_REVISIONS = frozenset({
-    "PIN_BEFORE_RUN", "TODO", "CHANGEME", "latest", "main", "master", "HEAD",
-    "None", "",
-})
+PLACEHOLDER_REVISIONS = frozenset(
+    {
+        "PIN_BEFORE_RUN",
+        "TODO",
+        "CHANGEME",
+        "latest",
+        "main",
+        "master",
+        "HEAD",
+        "None",
+        "",
+    }
+)
 
 # Group that provably fuses >=4 zero-padding sequences (stem-length histogram
 # 2/3/4/5 digits, 259 distinct integers over 593 filenames).  It is not a
@@ -260,8 +273,7 @@ REASON_TEXT = {
         "only valid on the distribution it was fitted to"
     ),
     "bulk_confirm_disabled": (
-        "bulk_confirm is disabled for this (class, group) by the calibration "
-        "artifact"
+        "bulk_confirm is disabled for this (class, group) by the calibration " "artifact"
     ),
     "group_unresolved": (
         "group is a provenance blob, not a capture family; permanently "
@@ -796,9 +808,8 @@ def rule_vegetation_reject(row: ObjectRow, calibration: Calibration) -> bool:
     veg_in = row.feature(F_VEG_IN)
     if veg_gain is None or veg_in is None:
         return False
-    return (
-        veg_gain < calibration.threshold("veg_gain_min")
-        and veg_in < calibration.threshold("veg_in_min")
+    return veg_gain < calibration.threshold("veg_gain_min") and veg_in < calibration.threshold(
+        "veg_in_min"
     )
 
 
@@ -868,9 +879,7 @@ def rule_bulk_confirm(
         and veg_gain >= calibration.threshold("family_b_veg_gain_min")
     )
     grabcut = row.feature(F_GRABCUT_IOU)
-    family_c = grabcut is not None and grabcut >= calibration.threshold(
-        "family_c_grabcut_iou_min"
-    )
+    family_c = grabcut is not None and grabcut >= calibration.threshold("family_c_grabcut_iou_min")
     if not (family_b or family_c):
         blockers.append("no_independent_corroboration")
 
@@ -913,9 +922,7 @@ def escalation_tier(
 ) -> str:
     """Escalation tiers bypass ranking entirely."""
     cross_class = row.feature(F_CROSS_CLASS_IOA)
-    if cross_class is not None and cross_class >= calibration.threshold(
-        "t0_cross_class_ioa_min"
-    ):
+    if cross_class is not None and cross_class >= calibration.threshold("t0_cross_class_ioa_min"):
         return TIER_CROSS_CLASS_INTRUSION
     rice_over_weed = row.feature(F_RICE_OVER_WEED_IOA)
     if rice_over_weed is not None and rice_over_weed > calibration.threshold(
@@ -931,9 +938,7 @@ def escalation_tier(
         return TIER_WEED_INTEGRITY
     if row.label == WEED_LABEL:
         return TIER_WEED_REMAINING
-    if "duplicate_collision" in row.reason_codes or rule_duplicate_collision(
-        row, calibration
-    ):
+    if "duplicate_collision" in row.reason_codes or rule_duplicate_collision(row, calibration):
         return TIER_RICE_COLLISION
     if context.capture_failure:
         return TIER_CAPTURE_FAILURE
@@ -979,9 +984,7 @@ def _collision_group_id(row: ObjectRow) -> str:
     return f"collision:{row.record_id}:{row.annotation_id}"
 
 
-def triage_objects(
-    rows: Sequence[ObjectRow], calibration: Calibration
-) -> list[Decision]:
+def triage_objects(rows: Sequence[ObjectRow], calibration: Calibration) -> list[Decision]:
     """Bucket + tier every object.  Exceptions fail open to human_review."""
     contexts = build_image_contexts(rows, calibration)
     decisions: list[Decision] = []
@@ -1061,9 +1064,7 @@ def _popcount(value: int) -> int:
     return bin(value).count("1")
 
 
-def assign_dhash_clusters(
-    decisions: Sequence[Decision], max_distance: int
-) -> dict[str, str]:
+def assign_dhash_clusters(decisions: Sequence[Decision], max_distance: int) -> dict[str, str]:
     """Near-duplicate clustering across the video-sequence families.
 
     Used ONLY for ordering (and, downstream, to offer an inherited outcome as a
@@ -1084,7 +1085,7 @@ def assign_dhash_clusters(
         return node
 
     for index, left in enumerate(record_ids):
-        for right in record_ids[index + 1:]:
+        for right in record_ids[index + 1 :]:
             if _popcount(hashes[left] ^ hashes[right]) <= max_distance:
                 a, b = find(left), find(right)
                 if a != b:
@@ -1132,9 +1133,7 @@ def score_decisions(decisions: Sequence[Decision], calibration: Calibration) -> 
     rows = [decision.row for decision in decisions]
     weights = class_weights(rows)
     medians = median_area_by_class(rows)
-    novelty = novelty_scores(
-        decisions, int(calibration.rank_number("novelty_max_images", 4000))
-    )
+    novelty = novelty_scores(decisions, int(calibration.rank_number("novelty_max_images", 4000)))
     cluster = assign_dhash_clusters(
         decisions, int(calibration.rank_number("dhash_cluster_max_distance", 6))
     )
@@ -1173,9 +1172,7 @@ def score_decisions(decisions: Sequence[Decision], calibration: Calibration) -> 
         else:
             influence = math.sqrt(max(area, 0.0) / median_area)
 
-        decision.impact = weight * uncertainty * influence * novelty.get(
-            row.record_id, 1.0
-        )
+        decision.impact = weight * uncertainty * influence * novelty.get(row.record_id, 1.0)
         decision.cost_seconds_est = (
             cost_base
             + cost_flagged * flagged_per_image[row.record_id]
@@ -1203,9 +1200,7 @@ class QueueImage:
     rank: int | None = None
 
 
-def build_image_queue(
-    decisions: Sequence[Decision], calibration: Calibration
-) -> list[QueueImage]:
+def build_image_queue(decisions: Sequence[Decision], calibration: Calibration) -> list[QueueImage]:
     """The queue unit is the IMAGE; buckets are per object.
 
     At a median 27 boxes per image, a per-object clean rate of 0.95 yields only
@@ -1257,9 +1252,7 @@ def build_image_queue(
     return ordered
 
 
-def interleave_by_group(
-    images: Sequence[QueueImage], calibration: Calibration
-) -> list[QueueImage]:
+def interleave_by_group(images: Sequence[QueueImage], calibration: Calibration) -> list[QueueImage]:
     """HARD group interleave, applied within a tier so escalations still lead.
 
     Without it the queue drains the largest capture family first and the
@@ -1326,9 +1319,7 @@ def _sample_key(salt: str, image_sha: str, annotation_id: str) -> int:
     return int(digest.hexdigest()[:8], 16)
 
 
-def select_spot_checks(
-    decisions: Sequence[Decision], calibration: Calibration
-) -> dict[str, Any]:
+def select_spot_checks(decisions: Sequence[Decision], calibration: Calibration) -> dict[str, Any]:
     """Deterministic audit sampling, stratified by capture family.
 
     auto_reject gets a power-derived sample plus a 100% CENSUS of anything the
@@ -1344,7 +1335,8 @@ def select_spot_checks(
 
     rejects = [d for d in decisions if d.bucket == BUCKET_AUTO_REJECT]
     census = [
-        d for d in rejects
+        d
+        for d in rejects
         if tuple(code for code in d.reason_codes if code != "mask_demoted")
         == ("vegetation_reject",)
     ]
@@ -1416,7 +1408,7 @@ def _stratified_hash_sample(
             ),
         )
         quota = int(round(target * len(pool) / total))
-        picked.extend(pool[:min(quota, len(pool))])
+        picked.extend(pool[: min(quota, len(pool))])
     if len(picked) < target:
         chosen = {id(d) for d in picked}
         leftovers = sorted(
@@ -1491,17 +1483,13 @@ def summarise(
     """
     bucket_counts = Counter(decision.bucket for decision in decisions)
     tier_counts = Counter(decision.tier for decision in decisions)
-    label_bucket = Counter(
-        (decision.row.label, decision.bucket) for decision in decisions
-    )
+    label_bucket = Counter((decision.row.label, decision.bucket) for decision in decisions)
     total_objects = len(decisions)
     total_images = len(images)
     flagged = sum(image.flagged_count for image in images)
     projected = total_images + flagged
     reduction = 1.0 - (projected / total_objects) if total_objects else 0.0
-    cluster_sizes = Counter(
-        image.dhash_cluster_id for image in images if image.dhash_cluster_id
-    )
+    cluster_sizes = Counter(image.dhash_cluster_id for image in images if image.dhash_cluster_id)
     histogram = Counter(cluster_sizes.values())
 
     return {
@@ -1516,9 +1504,7 @@ def summarise(
         "projected_human_decisions": projected,
         "baseline_human_decisions_all_annotations": total_objects,
         "implied_reduction_vs_all_annotations": reduction,
-        "images_with_zero_flagged_objects": sum(
-            1 for image in images if image.flagged_count == 0
-        ),
+        "images_with_zero_flagged_objects": sum(1 for image in images if image.flagged_count == 0),
         "dhash_cluster_size_histogram": {
             str(size): count for size, count in sorted(histogram.items())
         },
@@ -1560,9 +1546,9 @@ def run_triage(
 ) -> dict[str, Any]:
     """Pure-ish orchestrator: read, decide, rank, sample, emit.  Returns the
     manifest document so tests can assert on it without touching disk."""
-    assert BUCKETS.isdisjoint(REVIEW_STATUSES_SNAPSHOT), (
-        "triage bucket vocabulary must stay disjoint from REVIEW_STATUSES"
-    )
+    assert BUCKETS.isdisjoint(
+        REVIEW_STATUSES_SNAPSHOT
+    ), "triage bucket vocabulary must stay disjoint from REVIEW_STATUSES"
     for target in (out_path, manifest_path):
         if target is not None and Path(target).exists() and not overwrite:
             raise FileExistsError(f"{target} exists; pass --overwrite to replace it")
@@ -1618,16 +1604,35 @@ def run_triage(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--features", required=True, type=Path,
-                        help="proposal_features_v1.jsonl from optimize_proposals.py")
-    parser.add_argument("--calibration", required=True, type=Path,
-                        help="triage_calibration_v1.json; REQUIRED -- no defaults exist")
-    parser.add_argument("--out", required=True, type=Path,
-                        help="triage_queue_v1.jsonl sidecar (agrinav.triage_queue.v1)")
-    parser.add_argument("--out-manifest", type=Path, default=None,
-                        help="triage manifest JSON with per-annotation decisions + summary")
-    parser.add_argument("--no-manifest-objects", action="store_true",
-                        help="omit the per-annotation array from the manifest")
+    parser.add_argument(
+        "--features",
+        required=True,
+        type=Path,
+        help="proposal_features_v1.jsonl from optimize_proposals.py",
+    )
+    parser.add_argument(
+        "--calibration",
+        required=True,
+        type=Path,
+        help="triage_calibration_v1.json; REQUIRED -- no defaults exist",
+    )
+    parser.add_argument(
+        "--out",
+        required=True,
+        type=Path,
+        help="triage_queue_v1.jsonl sidecar (agrinav.triage_queue.v1)",
+    )
+    parser.add_argument(
+        "--out-manifest",
+        type=Path,
+        default=None,
+        help="triage manifest JSON with per-annotation decisions + summary",
+    )
+    parser.add_argument(
+        "--no-manifest-objects",
+        action="store_true",
+        help="omit the per-annotation array from the manifest",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
 
@@ -1648,9 +1653,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"triaged {summary['objects_total']} objects over {summary['images_total']} images")
     for bucket, count in summary["bucket_counts"].items():
         print(f"  {bucket:14s}: {count}")
-    print(f"  projected human decisions: {summary['projected_human_decisions']} "
-          f"(baseline {summary['baseline_human_decisions_all_annotations']}, "
-          f"implied reduction {summary['implied_reduction_vs_all_annotations']:.1%})")
+    print(
+        f"  projected human decisions: {summary['projected_human_decisions']} "
+        f"(baseline {summary['baseline_human_decisions_all_annotations']}, "
+        f"implied reduction {summary['implied_reduction_vs_all_annotations']:.1%})"
+    )
     print("  NOTE: bulk_confirm == queued for bulk HUMAN approval, not accepted.")
     return 0
 

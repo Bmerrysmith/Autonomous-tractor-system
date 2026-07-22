@@ -16,7 +16,7 @@ are grouped by capture session (the name before "_Frame_") so adjacent frames
 never leak across splits.
 
 CLI:
-    python scripts/paddy_supervisely_to_coco.py \
+    python -m agrinav.data.paddy_supervisely_to_coco \
         --tar paddy-rice-imagery-DatasetNinja.tar \
         --out-json artifacts/detector_v1/paddy_panicle.coco.json
 Options: --hash-images (compute image sha256; slower) --max-frames N
@@ -69,14 +69,20 @@ def supervisely_objects_to_annotations(ann, class_title="panicle", min_area=16):
         xs = [p[0] for p in exterior]
         ys = [p[1] for p in exterior]
         flat = [float(c) for p in exterior for c in p]
-        out.append({
-            "category_id": RICE_PROTECT_ID,
-            "segmentation": [flat],
-            "bbox": [float(min(xs)), float(min(ys)),
-                     float(max(xs) - min(xs)), float(max(ys) - min(ys))],
-            "area": float(area),
-            "iscrowd": 0,
-        })
+        out.append(
+            {
+                "category_id": RICE_PROTECT_ID,
+                "segmentation": [flat],
+                "bbox": [
+                    float(min(xs)),
+                    float(min(ys)),
+                    float(max(xs) - min(xs)),
+                    float(max(ys) - min(ys)),
+                ],
+                "area": float(area),
+                "iscrowd": 0,
+            }
+        )
     return out
 
 
@@ -85,8 +91,7 @@ def build_coco(tar_path, hash_images=False, max_frames=0, min_area=16):
     images, annotations = [], []
     img_id = ann_id = 0
     with tarfile.open(tar_path, "r") as tar:
-        ann_members = sorted(n for n in tar.getnames()
-                             if "/ann/" in n and n.endswith(".json"))
+        ann_members = sorted(n for n in tar.getnames() if "/ann/" in n and n.endswith(".json"))
         for member in ann_members:
             ann = json.load(tar.extractfile(member))
             frags = supervisely_objects_to_annotations(ann, min_area=min_area)
@@ -94,7 +99,7 @@ def build_coco(tar_path, hash_images=False, max_frames=0, min_area=16):
                 continue
             p = PurePosixPath(member)
             original_split = p.parts[0]
-            img_name = p.name[:-len(".json")]          # strip .json -> x.png
+            img_name = p.name[: -len(".json")]  # strip .json -> x.png
             stem = PurePosixPath(img_name).stem
             img_member = f"{original_split}/img/{img_name}"
             sha = None
@@ -105,21 +110,23 @@ def build_coco(tar_path, hash_images=False, max_frames=0, min_area=16):
                     sha = None
             size = ann.get("size", {})
             img_id += 1
-            images.append({
-                "id": img_id,
-                "file_name": img_member,
-                "width": int(size.get("width", 0)),
-                "height": int(size.get("height", 0)),
-                "sha256": sha,
-                "source_dataset": "paddy_panicle",
-                "group_id": f"paddy:{session_of(stem)}",
-                "session": session_of(stem),
-                "view": "aerial",
-                "original_split": original_split,
-                "annotation_origin": "paddy_supervisely_human_polygon",
-                "annotation_note": "panicle_only_partial_rice_coverage; no weeds",
-                "review_status": "derived_from_human_polygon",
-            })
+            images.append(
+                {
+                    "id": img_id,
+                    "file_name": img_member,
+                    "width": int(size.get("width", 0)),
+                    "height": int(size.get("height", 0)),
+                    "sha256": sha,
+                    "source_dataset": "paddy_panicle",
+                    "group_id": f"paddy:{session_of(stem)}",
+                    "session": session_of(stem),
+                    "view": "aerial",
+                    "original_split": original_split,
+                    "annotation_origin": "paddy_supervisely_human_polygon",
+                    "annotation_note": "panicle_only_partial_rice_coverage; no weeds",
+                    "review_status": "derived_from_human_polygon",
+                }
+            )
             for frag in frags:
                 ann_id += 1
                 annotations.append({"id": ann_id, "image_id": img_id, **frag})
@@ -132,7 +139,7 @@ def build_coco(tar_path, hash_images=False, max_frames=0, min_area=16):
             "ontology": "data/ontology.v1.json",
             "annotation_origin": "paddy_supervisely_human_polygon",
             "limitation": "panicle-only partial rice coverage; aerial; no weeds. "
-                          "Auxiliary aerial context, not a substitute for full-plant rice masks.",
+            "Auxiliary aerial context, not a substitute for full-plant rice masks.",
         },
         "categories": [{"id": RICE_PROTECT_ID, "name": "rice_protect"}],
         "images": images,

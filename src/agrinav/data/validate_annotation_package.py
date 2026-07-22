@@ -18,7 +18,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-
 SCHEMA_VERSION = "agrinav.annotation_record.v1"
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 REVIEW_STATUSES = {
@@ -79,7 +78,9 @@ def _require_mapping(value: Any, path: str, errors: list[str]) -> Mapping[str, A
     return value
 
 
-def _require_keys(value: Mapping[str, Any], keys: Iterable[str], path: str, errors: list[str]) -> None:
+def _require_keys(
+    value: Mapping[str, Any], keys: Iterable[str], path: str, errors: list[str]
+) -> None:
     for key in keys:
         if key not in value:
             errors.append(f"{path}.{key}: missing required field (use explicit null when unknown)")
@@ -121,7 +122,10 @@ def load_ontology(path: Path | str) -> dict[str, OntologyEntry]:
         if (
             not isinstance(geometry, list)
             or not geometry
-            or any(not isinstance(value, str) or value not in KNOWN_GEOMETRY_TYPES for value in geometry)
+            or any(
+                not isinstance(value, str) or value not in KNOWN_GEOMETRY_TYPES
+                for value in geometry
+            )
         ):
             raise AnnotationValidationError(
                 f"Ontology canonical_labels[{index}] has invalid or empty geometry list"
@@ -161,7 +165,9 @@ def _validate_object_attributes(
         errors.append(f"{path}.treatment_eligible: must be boolean or null")
     action = value.get("human_edit_action")
     if action is not None and action not in HUMAN_EDIT_ACTIONS:
-        errors.append(f"{path}.human_edit_action: must be one of {sorted(HUMAN_EDIT_ACTIONS)} or null")
+        errors.append(
+            f"{path}.human_edit_action: must be one of {sorted(HUMAN_EDIT_ACTIONS)} or null"
+        )
         action = None
     source_object_id = value.get("source_object_id")
     if not isinstance(source_object_id, str) or not source_object_id.strip():
@@ -192,10 +198,9 @@ def _validate_polygon(polygon: Any, width: int, height: int, path: str, errors: 
     points = list(zip(polygon[0::2], polygon[1::2]))
     if any(x < 0 or y < 0 or x > width or y > height for x, y in points):
         errors.append(f"{path}: polygon lies outside {width}x{height} image bounds")
-    area2 = abs(sum(
-        x1 * y2 - x2 * y1
-        for (x1, y1), (x2, y2) in zip(points, points[1:] + points[:1])
-    ))
+    area2 = abs(
+        sum(x1 * y2 - x2 * y1 for (x1, y1), (x2, y2) in zip(points, points[1:] + points[:1]))
+    )
     if area2 == 0:
         errors.append(f"{path}: polygon has zero area")
 
@@ -212,8 +217,12 @@ def _validate_rle(rle: Any, width: int, height: int, path: str, errors: list[str
     counts = value.get("counts")
     decoded_counts: list[int] | None = None
     if isinstance(counts, list):
-        if not counts or any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in counts):
-            errors.append(f"{path}.counts: uncompressed RLE must be non-empty non-negative integers")
+        if not counts or any(
+            isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in counts
+        ):
+            errors.append(
+                f"{path}.counts: uncompressed RLE must be non-empty non-negative integers"
+            )
         else:
             decoded_counts = counts
     elif isinstance(counts, str) and counts:
@@ -262,7 +271,9 @@ def _decode_coco_compressed_rle(encoded: str) -> list[int]:
     return counts
 
 
-def _validate_geometry(geometry: Any, width: int, height: int, path: str, errors: list[str]) -> None:
+def _validate_geometry(
+    geometry: Any, width: int, height: int, path: str, errors: list[str]
+) -> None:
     value = _require_mapping(geometry, path, errors)
     if value is None:
         return
@@ -296,8 +307,15 @@ def validate_record(
     if value is None:
         return errors
     required = (
-        "schema_version", "record_id", "image_id", "source", "provenance",
-        "review", "verified_empty", "unusable", "annotations",
+        "schema_version",
+        "record_id",
+        "image_id",
+        "source",
+        "provenance",
+        "review",
+        "verified_empty",
+        "unusable",
+        "annotations",
     )
     _require_keys(value, required, location, errors)
     _reject_unexpected(value, required, location, errors)
@@ -311,9 +329,22 @@ def validate_record(
     width = height = 0
     if source is not None:
         source_keys = (
-            "dataset_id", "dataset_version", "image_uri", "source_image_sha256", "width", "height",
-            "country", "site_id", "field_id", "session_id", "capture_pass_id", "frame_id",
-            "source_photo_id", "group_id", "split", "capture_metadata",
+            "dataset_id",
+            "dataset_version",
+            "image_uri",
+            "source_image_sha256",
+            "width",
+            "height",
+            "country",
+            "site_id",
+            "field_id",
+            "session_id",
+            "capture_pass_id",
+            "frame_id",
+            "source_photo_id",
+            "group_id",
+            "split",
+            "capture_metadata",
         )
         _require_keys(source, source_keys, f"{location}.source", errors)
         _reject_unexpected(source, source_keys, f"{location}.source", errors)
@@ -322,7 +353,9 @@ def validate_record(
                 errors.append(f"{location}.source.{field}: must be a non-empty string")
         digest = source.get("source_image_sha256")
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
-            errors.append(f"{location}.source.source_image_sha256: must be 64 hexadecimal characters")
+            errors.append(
+                f"{location}.source.source_image_sha256: must be 64 hexadecimal characters"
+            )
         width, height = source.get("width"), source.get("height")
         if isinstance(width, bool) or not isinstance(width, int) or width <= 0:
             errors.append(f"{location}.source.width: must be a positive integer")
@@ -331,21 +364,35 @@ def validate_record(
             errors.append(f"{location}.source.height: must be a positive integer")
             height = 0
         for field in (
-            "dataset_version", "country", "site_id", "field_id", "session_id",
-            "capture_pass_id", "frame_id", "source_photo_id",
+            "dataset_version",
+            "country",
+            "site_id",
+            "field_id",
+            "session_id",
+            "capture_pass_id",
+            "frame_id",
+            "source_photo_id",
         ):
             _nullable_string(source.get(field), f"{location}.source.{field}", errors)
         if source.get("split") not in SPLITS:
             errors.append(f"{location}.source.split: must be one of {sorted(SPLITS)}")
-        if source.get("capture_metadata") is not None and not isinstance(source.get("capture_metadata"), dict):
+        if source.get("capture_metadata") is not None and not isinstance(
+            source.get("capture_metadata"), dict
+        ):
             errors.append(f"{location}.source.capture_metadata: must be an object or null")
 
     provenance = _require_mapping(value.get("provenance"), f"{location}.provenance", errors)
     method = model_id = human_edit_state = None
     if provenance is not None:
         provenance_keys = (
-            "proposal_model_id", "proposal_model_revision", "proposal_method", "prompt",
-            "thresholds", "generated_at", "original_proposal", "human_edit_state",
+            "proposal_model_id",
+            "proposal_model_revision",
+            "proposal_method",
+            "prompt",
+            "thresholds",
+            "generated_at",
+            "original_proposal",
+            "human_edit_state",
         )
         _require_keys(provenance, provenance_keys, f"{location}.provenance", errors)
         _reject_unexpected(provenance, provenance_keys, f"{location}.provenance", errors)
@@ -355,67 +402,107 @@ def validate_record(
         method = provenance.get("proposal_method")
         if method not in {"manual", "imported", "model_assisted", "model_silence"}:
             errors.append(f"{location}.provenance.proposal_method: invalid method")
-        if provenance.get("thresholds") is not None and not isinstance(provenance.get("thresholds"), dict):
+        if provenance.get("thresholds") is not None and not isinstance(
+            provenance.get("thresholds"), dict
+        ):
             errors.append(f"{location}.provenance.thresholds: must be an object or null")
         original_proposal = provenance.get("original_proposal")
         if original_proposal is not None and not isinstance(original_proposal, (dict, list)):
-            errors.append(f"{location}.provenance.original_proposal: must be an object, array, or null")
+            errors.append(
+                f"{location}.provenance.original_proposal: must be an object, array, or null"
+            )
         human_edit_state = provenance.get("human_edit_state")
         if human_edit_state not in HUMAN_EDIT_STATES:
             errors.append(f"{location}.provenance.human_edit_state: invalid edit state")
         if method in MODEL_METHODS and model_id is None:
-            errors.append(f"{location}.provenance.proposal_model_id: required for model-derived records")
+            errors.append(
+                f"{location}.provenance.proposal_model_id: required for model-derived records"
+            )
         if method in MODEL_METHODS:
             for field in ("proposal_model_revision", "prompt", "generated_at"):
                 if provenance.get(field) is None:
-                    errors.append(f"{location}.provenance.{field}: required for model-derived records")
+                    errors.append(
+                        f"{location}.provenance.{field}: required for model-derived records"
+                    )
             thresholds = provenance.get("thresholds")
             if not isinstance(thresholds, dict) or not thresholds:
                 errors.append(
                     f"{location}.provenance.thresholds: model-derived records require a non-empty object"
                 )
             if original_proposal is None:
-                errors.append(f"{location}.provenance.original_proposal: model-derived records must preserve raw output")
+                errors.append(
+                    f"{location}.provenance.original_proposal: model-derived records must preserve raw output"
+                )
         if method == "imported" and original_proposal is None:
-            errors.append(f"{location}.provenance.original_proposal: imported records must preserve raw source objects")
+            errors.append(
+                f"{location}.provenance.original_proposal: imported records must preserve raw source objects"
+            )
         if method == "manual":
             proposal_fields = (
-                "proposal_model_id", "proposal_model_revision", "prompt", "thresholds",
-                "generated_at", "original_proposal",
+                "proposal_model_id",
+                "proposal_model_revision",
+                "prompt",
+                "thresholds",
+                "generated_at",
+                "original_proposal",
             )
             if any(provenance.get(field) is not None for field in proposal_fields):
                 errors.append(
                     f"{location}.provenance: manual records must use explicit null proposal/model fields"
                 )
             if human_edit_state != "human_only":
-                errors.append(f"{location}.provenance.human_edit_state: manual records must use 'human_only'")
+                errors.append(
+                    f"{location}.provenance.human_edit_state: manual records must use 'human_only'"
+                )
 
     review = _require_mapping(value.get("review"), f"{location}.review", errors)
     review_status = reviewer_id = None
     if review is not None:
         review_keys = (
-            "annotator_id", "annotator_completed_at", "reviewer_id", "reviewed_at",
-            "review_status", "annotation_version", "guide_version",
+            "annotator_id",
+            "annotator_completed_at",
+            "reviewer_id",
+            "reviewed_at",
+            "review_status",
+            "annotation_version",
+            "guide_version",
         )
         _require_keys(review, review_keys, f"{location}.review", errors)
         _reject_unexpected(review, review_keys, f"{location}.review", errors)
         for field in (
-            "annotator_id", "annotator_completed_at", "reviewer_id", "reviewed_at",
-            "annotation_version", "guide_version",
+            "annotator_id",
+            "annotator_completed_at",
+            "reviewer_id",
+            "reviewed_at",
+            "annotation_version",
+            "guide_version",
         ):
             _nullable_string(review.get(field), f"{location}.review.{field}", errors)
         review_status = review.get("review_status")
         reviewer_id = review.get("reviewer_id")
         if review_status not in REVIEW_STATUSES:
             errors.append(f"{location}.review.review_status: invalid status")
-        if review_status in ACCEPTED_STATUSES and (method in MODEL_METHODS or model_id is not None) and reviewer_id is None:
-            errors.append(f"{location}.review.reviewer_id: accepted model-assisted records require a human reviewer")
+        if (
+            review_status in ACCEPTED_STATUSES
+            and (method in MODEL_METHODS or model_id is not None)
+            and reviewer_id is None
+        ):
+            errors.append(
+                f"{location}.review.reviewer_id: accepted model-assisted records require a human reviewer"
+            )
         if review_status in ACCEPTED_STATUSES:
-            for field in ("annotator_id", "annotator_completed_at", "annotation_version", "guide_version"):
+            for field in (
+                "annotator_id",
+                "annotator_completed_at",
+                "annotation_version",
+                "guide_version",
+            ):
                 if review.get(field) is None:
                     errors.append(f"{location}.review.{field}: required for accepted records")
             if reviewer_id is not None and review.get("reviewed_at") is None:
-                errors.append(f"{location}.review.reviewed_at: required when reviewer_id is present")
+                errors.append(
+                    f"{location}.review.reviewed_at: required when reviewer_id is present"
+                )
             if method in MODEL_METHODS and human_edit_state == "unreviewed":
                 errors.append(
                     f"{location}.provenance.human_edit_state: accepted model-derived records cannot be unreviewed"
@@ -430,9 +517,13 @@ def validate_record(
         unusable = False
     if unusable:
         if verified_empty is not None:
-            errors.append(f"{location}.verified_empty: unusable images must remain unverified (null)")
+            errors.append(
+                f"{location}.verified_empty: unusable images must remain unverified (null)"
+            )
         if review_status in ACCEPTED_STATUSES:
-            errors.append(f"{location}.review.review_status: unusable images cannot be accepted/adjudicated")
+            errors.append(
+                f"{location}.review.review_status: unusable images cannot be accepted/adjudicated"
+            )
     if review_status == "rejected_unusable":
         if not unusable:
             errors.append(f"{location}.unusable: rejected_unusable review requires unusable=true")
@@ -451,7 +542,12 @@ def validate_record(
         if item is None:
             continue
         annotation_keys = (
-            "annotation_id", "label", "biological_class", "decision_role", "geometry", "attributes",
+            "annotation_id",
+            "label",
+            "biological_class",
+            "decision_role",
+            "geometry",
+            "attributes",
         )
         _require_keys(item, annotation_keys, path, errors)
         _reject_unexpected(item, annotation_keys, path, errors)
@@ -459,7 +555,9 @@ def validate_record(
         if not isinstance(annotation_id, str) or not annotation_id.strip():
             errors.append(f"{path}.annotation_id: must be a non-empty string")
         elif annotation_id in annotation_ids:
-            errors.append(f"{path}.annotation_id: duplicate annotation ID {annotation_id!r} within record")
+            errors.append(
+                f"{path}.annotation_id: duplicate annotation ID {annotation_id!r} within record"
+            )
         else:
             annotation_ids.add(annotation_id)
         label = item.get("label")
@@ -507,11 +605,17 @@ def validate_record(
 
     if verified_empty is True:
         if has_weed_target:
-            errors.append(f"{location}.verified_empty: cannot coexist with a weed_target annotation")
+            errors.append(
+                f"{location}.verified_empty: cannot coexist with a weed_target annotation"
+            )
         if review_status not in ACCEPTED_STATUSES or reviewer_id is None:
-            errors.append(f"{location}.verified_empty: requires accepted/adjudicated full-image human review")
+            errors.append(
+                f"{location}.verified_empty: requires accepted/adjudicated full-image human review"
+            )
         if method == "model_silence" and human_edit_state in {"unreviewed", "accepted_unchanged"}:
-            errors.append(f"{location}.verified_empty: model silence cannot establish a verified empty")
+            errors.append(
+                f"{location}.verified_empty: model silence cannot establish a verified empty"
+            )
     elif verified_empty is False:
         if not has_weed_target:
             errors.append(
@@ -535,7 +639,9 @@ def read_jsonl(path: Path | str) -> list[tuple[int, Any]]:
                 try:
                     rows.append((line_number, json.loads(line)))
                 except json.JSONDecodeError as exc:
-                    raise AnnotationValidationError(f"{path}:{line_number}: invalid JSON: {exc}") from exc
+                    raise AnnotationValidationError(
+                        f"{path}:{line_number}: invalid JSON: {exc}"
+                    ) from exc
     except OSError as exc:
         raise AnnotationValidationError(f"Could not read {path}: {exc}") from exc
     if not rows:
@@ -546,7 +652,11 @@ def read_jsonl(path: Path | str) -> list[tuple[int, Any]]:
 def _group_split_pairs(document: Any) -> Iterable[tuple[str, str]]:
     if isinstance(document, dict):
         source = document.get("source")
-        if isinstance(source, dict) and isinstance(source.get("group_id"), str) and isinstance(source.get("split"), str):
+        if (
+            isinstance(source, dict)
+            and isinstance(source.get("group_id"), str)
+            and isinstance(source.get("split"), str)
+        ):
             yield source["group_id"], source["split"]
         if isinstance(document.get("group_id"), str) and isinstance(document.get("split"), str):
             yield document["group_id"], document["split"]
@@ -570,7 +680,8 @@ def validate_split_groups(documents: Iterable[tuple[str, Any]]) -> list[str]:
     for group_id, by_split in sorted(assignments.items()):
         if len(by_split) > 1:
             detail = ", ".join(
-                f"{split} ({', '.join(sorted(origins))})" for split, origins in sorted(by_split.items())
+                f"{split} ({', '.join(sorted(origins))})"
+                for split, origins in sorted(by_split.items())
             )
             errors.append(f"split overlap: group {group_id!r} appears in {detail}")
     return errors
@@ -600,7 +711,9 @@ def validate_packages(
                 record_id = record.get("record_id")
                 if isinstance(record_id, str):
                     if record_id in seen_record_ids:
-                        errors.append(f"{location}.record_id: duplicate {record_id!r}; first seen at {seen_record_ids[record_id]}")
+                        errors.append(
+                            f"{location}.record_id: duplicate {record_id!r}; first seen at {seen_record_ids[record_id]}"
+                        )
                     else:
                         seen_record_ids[record_id] = location
                 image_id = record.get("image_id")
@@ -615,7 +728,9 @@ def validate_packages(
                 source = record.get("source")
                 if isinstance(source, dict):
                     digest = source.get("source_image_sha256")
-                    group_id = source.get("group_id") if isinstance(source.get("group_id"), str) else None
+                    group_id = (
+                        source.get("group_id") if isinstance(source.get("group_id"), str) else None
+                    )
                     if isinstance(digest, str) and SHA256_RE.fullmatch(digest):
                         digest_key = digest.lower()
                         if digest_key in seen_source_hashes:
@@ -632,10 +747,14 @@ def validate_packages(
                         else:
                             seen_source_hashes[digest_key] = (location, group_id)
                 for annotation in record.get("annotations", []):
-                    if isinstance(annotation, dict) and isinstance(annotation.get("annotation_id"), str):
+                    if isinstance(annotation, dict) and isinstance(
+                        annotation.get("annotation_id"), str
+                    ):
                         annotation_id = annotation["annotation_id"]
                         if annotation_id in seen_annotation_ids:
-                            errors.append(f"{location}: duplicate package annotation ID {annotation_id!r}; first seen at {seen_annotation_ids[annotation_id]}")
+                            errors.append(
+                                f"{location}: duplicate package annotation ID {annotation_id!r}; first seen at {seen_annotation_ids[annotation_id]}"
+                            )
                         else:
                             seen_annotation_ids[annotation_id] = location
     if check_split_overlap:
@@ -658,7 +777,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("packages", nargs="+", type=Path, help="JSONL package(s) to validate")
     parser.add_argument("--ontology", type=Path, default=_default_ontology())
-    parser.add_argument("--manifest", action="append", default=[], type=Path, help="JSON manifest included in split-overlap checks")
+    parser.add_argument(
+        "--manifest",
+        action="append",
+        default=[],
+        type=Path,
+        help="JSON manifest included in split-overlap checks",
+    )
     parser.add_argument("--check-split-overlap", action="store_true")
     return parser
 

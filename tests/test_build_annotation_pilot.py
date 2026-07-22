@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from scripts.build_annotation_pilot import (
+from agrinav.data.build_annotation_pilot import (
     PilotBuildError,
     annotation_record_stub,
     build_manifest,
@@ -20,7 +20,7 @@ from scripts.build_annotation_pilot import (
     sha256_file,
     write_annotation_stubs,
 )
-from scripts.validate_annotation_package import validate_packages
+from agrinav.data.validate_annotation_package import validate_packages
 
 
 def png_bytes(value: int, size: tuple[int, int] = (8, 8), mode: str = "L") -> bytes:
@@ -164,12 +164,14 @@ class AnnotationPilotTests(unittest.TestCase):
         bad_coco = Path(self.temporary.name) / "bad_detector.zip"
         document = {
             "images": [{"id": 1, "file_name": "bad.png", "width": 8, "height": 8}],
-            "annotations": [{
-                "id": 1,
-                "image_id": 1,
-                "category_id": 1,
-                "bbox": [7, 7, 2, 2],
-            }],
+            "annotations": [
+                {
+                    "id": 1,
+                    "image_id": 1,
+                    "category_id": 1,
+                    "bbox": [7, 7, 2, 2],
+                }
+            ],
             "categories": [{"id": 1, "name": "weed"}],
         }
         with zipfile.ZipFile(bad_coco, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -290,11 +292,13 @@ class AnnotationPilotTests(unittest.TestCase):
     def test_config_loader_and_annotation_stub_keep_unknowns_explicit(self) -> None:
         config_path = Path(self.temporary.name) / "pilot.json"
         config_path.write_text(
-            json.dumps({
-                "total_images": 200,
-                "gold_images": 40,
-                "sampling_targets": {"weed_positive_fraction_min": 0.35},
-            }),
+            json.dumps(
+                {
+                    "total_images": 200,
+                    "gold_images": 40,
+                    "sampling_targets": {"weed_positive_fraction_min": 0.35},
+                }
+            ),
             encoding="utf-8",
         )
         config = load_pilot_config(config_path)

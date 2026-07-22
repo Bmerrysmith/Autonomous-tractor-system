@@ -23,12 +23,10 @@ import sys
 import tempfile
 import zipfile
 from collections import Counter, defaultdict
-from io import BytesIO
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from PIL import Image
-
 
 SCHEMA_VERSION = "agrinav.annotation_pilot.v1"
 DEFAULT_TARGET_SIZE = 200
@@ -143,7 +141,9 @@ def _parse_riceseg_member(member: str) -> tuple[str, str | None, str, str] | Non
     return country, site, kind, parts[-1]
 
 
-def _mask_histogram(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[int, int, dict[int, int]]:
+def _mask_histogram(
+    archive: zipfile.ZipFile, info: zipfile.ZipInfo
+) -> tuple[int, int, dict[int, int]]:
     _require_small_member(info, kind="RiceSEG mask")
     with archive.open(info, "r") as stream:
         with Image.open(stream) as mask:
@@ -160,7 +160,11 @@ def _mask_histogram(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[in
                     f"RiceSEG mask {info.filename!r} has values outside [0, 255]: {extrema}"
                 )
             histogram = mask.convert("L").histogram()
-            unknown = [value for value, count in enumerate(histogram) if count and value not in RICESEG_CLASS_NAMES]
+            unknown = [
+                value
+                for value, count in enumerate(histogram)
+                if count and value not in RICESEG_CLASS_NAMES
+            ]
             if unknown:
                 raise PilotBuildError(
                     f"RiceSEG mask {info.filename!r} has unknown class values: {unknown}"
@@ -218,7 +222,8 @@ def inventory_riceseg(zip_path: Path | str) -> tuple[list[dict[str, Any]], dict[
             raise PilotBuildError("No paired RiceSEG rgb/label media found")
 
         for (country, site, _), pair in sorted(
-            pairs.items(), key=lambda item: tuple("" if value is None else value.casefold() for value in item[0])
+            pairs.items(),
+            key=lambda item: tuple("" if value is None else value.casefold() for value in item[0]),
         ):
             image_member = pair["rgb"]
             mask_member = pair["label"]
@@ -461,7 +466,9 @@ def inventory_coco(
                 raise PilotBuildError(
                     f"COCO annotation {annotation_id!r} references unknown image {image_id!r}"
                 )
-            category_id = _validate_identifier(annotation.get("category_id"), kind="annotation category")
+            category_id = _validate_identifier(
+                annotation.get("category_id"), kind="annotation category"
+            )
             if category_id not in categories:
                 raise PilotBuildError(
                     f"COCO annotation {annotation_id!r} references unknown category {category_id!r}"
@@ -469,10 +476,17 @@ def inventory_coco(
             bbox = annotation.get("bbox")
             if not isinstance(bbox, list) or len(bbox) != 4:
                 raise PilotBuildError(f"COCO annotation {annotation_id!r} has invalid bbox")
-            if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in bbox):
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                for value in bbox
+            ):
                 raise PilotBuildError(f"COCO annotation {annotation_id!r} has non-finite bbox")
             if bbox[2] <= 0 or bbox[3] <= 0:
-                raise PilotBuildError(f"COCO annotation {annotation_id!r} has non-positive bbox size")
+                raise PilotBuildError(
+                    f"COCO annotation {annotation_id!r} has non-positive bbox size"
+                )
             annotations_by_image[image_id].append(annotation)
 
         for image_id, image in sorted(images.items(), key=lambda item: str(item[0])):
@@ -507,9 +521,13 @@ def inventory_coco(
                         f"COCO annotation {annotation['id']!r} lies outside image "
                         f"{image_id!r} bounds"
                     )
-            class_counts: Counter[str] = Counter(categories[item["category_id"]] for item in proposals)
+            class_counts: Counter[str] = Counter(
+                categories[item["category_id"]] for item in proposals
+            )
             weed_count = sum(
-                count for name, count in class_counts.items() if name.casefold() in {"weed", "weeds"}
+                count
+                for name, count in class_counts.items()
+                if name.casefold() in {"weed", "weeds"}
             )
             small_count = sum(item["bbox"][2] * item["bbox"][3] < 32 * 32 for item in proposals)
             small_fraction = small_count / len(proposals) if proposals else 0.0
@@ -548,9 +566,7 @@ def inventory_coco(
                     "group_method": "capture_family_from_filename",
                     "group_confidence": confidence,
                     "proposal_class_counts": dict(sorted(class_counts.items())),
-                    "proposal_annotation_ids": sorted(
-                        (item["id"] for item in proposals), key=str
-                    ),
+                    "proposal_annotation_ids": sorted((item["id"] for item in proposals), key=str),
                     "proposal_weed_positive": bool(weed_count),
                     "proposal_small_box_fraction": round(small_fraction, 8),
                     "selection_hardness": round(hardness, 6),
@@ -627,7 +643,9 @@ def _select_from_dataset(
 ) -> list[dict[str, Any]]:
     if count > len(records):
         raise PilotBuildError(f"Requested {count} samples from only {len(records)} records")
-    weed_quota = min(math.ceil(count * weed_fraction), sum(r["proposal_weed_positive"] for r in records))
+    weed_quota = min(
+        math.ceil(count * weed_fraction), sum(r["proposal_weed_positive"] for r in records)
+    )
     weed_records = [record for record in records if record["proposal_weed_positive"]]
     selected = _round_robin_groups(weed_records, weed_quota, seed)
     selected_ids = {record["sample_id"] for record in selected}
@@ -713,9 +731,7 @@ def assign_gold_subset(
 ) -> dict[str, Any]:
     """Freeze a deterministic, source-balanced, group-diverse gold subset."""
     if gold_size <= 0 or gold_size > len(samples):
-        raise PilotBuildError(
-            f"Gold subset must contain 1-{len(samples)} samples; got {gold_size}"
-        )
+        raise PilotBuildError(f"Gold subset must contain 1-{len(samples)} samples; got {gold_size}")
     by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for sample in samples:
         by_source[sample["source_dataset"]].append(sample)
@@ -763,7 +779,10 @@ def populate_selected_lineage_and_hashes(
     coco_zip: Path | str,
 ) -> None:
     """Attach per-image identity and explicit-null lineage to selected rows only."""
-    with zipfile.ZipFile(riceseg_zip, "r") as rice_archive, zipfile.ZipFile(coco_zip, "r") as coco_archive:
+    with (
+        zipfile.ZipFile(riceseg_zip, "r") as rice_archive,
+        zipfile.ZipFile(coco_zip, "r") as coco_archive,
+    ):
         archives = {
             "RiceSEG": rice_archive,
             "rice_detection_for_export": coco_archive,
@@ -895,21 +914,32 @@ def materialize_selected_media(
 ) -> None:
     """Copy only selected images and RiceSEG masks into an explicit directory."""
     output_dir = Path(output_dir)
-    with zipfile.ZipFile(riceseg_zip, "r") as rice_archive, zipfile.ZipFile(coco_zip, "r") as coco_archive:
+    with (
+        zipfile.ZipFile(riceseg_zip, "r") as rice_archive,
+        zipfile.ZipFile(coco_zip, "r") as coco_archive,
+    ):
         for record in samples:
             source_name = "riceseg" if record["source_dataset"] == "RiceSEG" else "detector"
             archive = rice_archive if source_name == "riceseg" else coco_archive
-            image_path = output_dir / source_name / "images" / _safe_materialized_name(
-                record["selection_rank"], record["image_member"]
+            image_path = (
+                output_dir
+                / source_name
+                / "images"
+                / _safe_materialized_name(record["selection_rank"], record["image_member"])
             )
             _copy_zip_member(archive, record["image_member"], image_path, overwrite=overwrite)
             record["materialized_image_path"] = str(image_path.resolve())
             record["materialized_annotation_path"] = None
             if source_name == "riceseg":
-                mask_path = output_dir / source_name / "masks" / _safe_materialized_name(
-                    record["selection_rank"], record["annotation_member"]
+                mask_path = (
+                    output_dir
+                    / source_name
+                    / "masks"
+                    / _safe_materialized_name(record["selection_rank"], record["annotation_member"])
                 )
-                _copy_zip_member(archive, record["annotation_member"], mask_path, overwrite=overwrite)
+                _copy_zip_member(
+                    archive, record["annotation_member"], mask_path, overwrite=overwrite
+                )
                 record["materialized_annotation_path"] = str(mask_path.resolve())
 
 
@@ -1055,7 +1085,9 @@ def _write_text_atomic(payload: str, path: Path, *, overwrite: bool, kind: str) 
         raise
 
 
-def write_manifest(manifest: Mapping[str, Any], path: Path | str, *, overwrite: bool = False) -> None:
+def write_manifest(
+    manifest: Mapping[str, Any], path: Path | str, *, overwrite: bool = False
+) -> None:
     path = Path(path)
     payload = json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     _write_text_atomic(payload, path, overwrite=overwrite, kind="manifest")
@@ -1118,9 +1150,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         weed_fraction = (
             args.weed_fraction
             if args.weed_fraction is not None
-            else float(config["sampling_targets"]["weed_positive_fraction_min"])
-            if config is not None
-            else 0.5
+            else (
+                float(config["sampling_targets"]["weed_positive_fraction_min"])
+                if config is not None
+                else 0.5
+            )
         )
         _preflight_output(args.output_manifest, overwrite=args.overwrite, kind="manifest")
         _preflight_output(

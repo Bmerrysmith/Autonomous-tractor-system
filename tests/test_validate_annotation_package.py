@@ -4,13 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.validate_annotation_package import (
+from agrinav.data.validate_annotation_package import (
     load_ontology,
     validate_packages,
     validate_record,
     validate_split_groups,
 )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 ONTOLOGY_PATH = ROOT / "data" / "ontology.v1.json"
@@ -107,31 +106,35 @@ class AnnotationRecordValidationTests(unittest.TestCase):
 
     def test_unknown_vegetation_is_safe_nonactionable(self) -> None:
         record = base_record()
-        record["annotations"] = [{
-            "annotation_id": "ann-unknown",
-            "label": "unknown_vegetation",
-            "biological_class": "unknown_vegetation",
-            "decision_role": "unknown_nonactionable",
-            "geometry": {"type": "polygon", "polygon": [0, 0, 8, 0, 8, 6, 0, 6]},
-            "attributes": object_attributes(),
-        }]
+        record["annotations"] = [
+            {
+                "annotation_id": "ann-unknown",
+                "label": "unknown_vegetation",
+                "biological_class": "unknown_vegetation",
+                "decision_role": "unknown_nonactionable",
+                "geometry": {"type": "polygon", "polygon": [0, 0, 8, 0, 8, 6, 0, 6]},
+                "attributes": object_attributes(),
+            }
+        ]
         self.assertValid(record)
 
     def test_ood_record_with_non_target_aquatic_mask_is_valid(self) -> None:
         record = base_record()
         record["source"]["split"] = "ood"
         record["source"]["country"] = "Japan"
-        record["annotations"] = [{
-            "annotation_id": "ann-aquatic",
-            "label": "non_target_aquatic",
-            "biological_class": "duckweed_or_aquatic_vegetation",
-            "decision_role": "unknown_nonactionable",
-            "geometry": {
-                "type": "semantic_mask",
-                "rle": {"size": [80, 100], "counts": [10, 3, 7987]},
-            },
-            "attributes": object_attributes(),
-        }]
+        record["annotations"] = [
+            {
+                "annotation_id": "ann-aquatic",
+                "label": "non_target_aquatic",
+                "biological_class": "duckweed_or_aquatic_vegetation",
+                "decision_role": "unknown_nonactionable",
+                "geometry": {
+                    "type": "semantic_mask",
+                    "rle": {"size": [80, 100], "counts": [10, 3, 7987]},
+                },
+                "attributes": object_attributes(),
+            }
+        ]
         self.assertValid(record)
 
     def test_missing_nullable_source_field_is_not_silently_accepted(self) -> None:
@@ -192,11 +195,13 @@ class AnnotationRecordValidationTests(unittest.TestCase):
     def test_verified_empty_rejects_weed_target(self) -> None:
         record = base_record()
         record["verified_empty"] = True
-        record["annotations"][0].update({
-            "label": "weed_target",
-            "biological_class": "weed",
-            "decision_role": "target",
-        })
+        record["annotations"][0].update(
+            {
+                "label": "weed_target",
+                "biological_class": "weed",
+                "decision_role": "target",
+            }
+        )
         self.assertInvalidContains(record, "cannot coexist")
 
     def test_verified_empty_false_requires_accepted_weed(self) -> None:
@@ -204,11 +209,13 @@ class AnnotationRecordValidationTests(unittest.TestCase):
         record["verified_empty"] = False
         self.assertInvalidContains(record, "false requires at least one")
 
-        record["annotations"][0].update({
-            "label": "weed_target",
-            "biological_class": "weed",
-            "decision_role": "target",
-        })
+        record["annotations"][0].update(
+            {
+                "label": "weed_target",
+                "biological_class": "weed",
+                "decision_role": "target",
+            }
+        )
         self.assertValid(record)
 
         record["review"]["review_status"] = "in_review"
@@ -217,72 +224,82 @@ class AnnotationRecordValidationTests(unittest.TestCase):
     def test_deleted_weed_proposal_does_not_conflict_with_verified_empty(self) -> None:
         record = base_record()
         record["verified_empty"] = True
-        record["annotations"][0].update({
-            "label": "weed_target",
-            "biological_class": "weed",
-            "decision_role": "target",
-            "geometry": {"type": "bbox", "bbox": [10, 10, 20, 20]},
-            "attributes": object_attributes(
-                source_object_id="proposal-weed-1",
-                human_edit_action="deleted",
-            ),
-        })
+        record["annotations"][0].update(
+            {
+                "label": "weed_target",
+                "biological_class": "weed",
+                "decision_role": "target",
+                "geometry": {"type": "bbox", "bbox": [10, 10, 20, 20]},
+                "attributes": object_attributes(
+                    source_object_id="proposal-weed-1",
+                    human_edit_action="deleted",
+                ),
+            }
+        )
         self.assertValid(record)
 
     def test_model_silence_cannot_establish_verified_empty(self) -> None:
         record = base_record()
         record["verified_empty"] = True
         record["annotations"] = []
-        record["provenance"].update({
-            "proposal_model_id": "org/model",
-            "proposal_model_revision": "abc123",
-            "proposal_method": "model_silence",
-            "prompt": "weed",
-            "thresholds": {"box": 0.4},
-            "generated_at": "2026-07-20T12:00:00Z",
-            "original_proposal": [],
-            "human_edit_state": "accepted_unchanged",
-        })
+        record["provenance"].update(
+            {
+                "proposal_model_id": "org/model",
+                "proposal_model_revision": "abc123",
+                "proposal_method": "model_silence",
+                "prompt": "weed",
+                "thresholds": {"box": 0.4},
+                "generated_at": "2026-07-20T12:00:00Z",
+                "original_proposal": [],
+                "human_edit_state": "accepted_unchanged",
+            }
+        )
         self.assertInvalidContains(record, "model silence")
 
     def test_accepted_model_assisted_record_requires_reviewer(self) -> None:
         record = base_record()
-        record["provenance"].update({
-            "proposal_model_id": "org/model",
-            "proposal_model_revision": "rev-1",
-            "proposal_method": "model_assisted",
-            "prompt": "rice . weed . unknown vegetation",
-            "thresholds": {"box": 0.35, "text": 0.25},
-            "generated_at": "2026-07-20T12:00:00Z",
-            "original_proposal": {"objects": [{"label": "plant", "score": 0.9}]},
-            "human_edit_state": "edited",
-        })
+        record["provenance"].update(
+            {
+                "proposal_model_id": "org/model",
+                "proposal_model_revision": "rev-1",
+                "proposal_method": "model_assisted",
+                "prompt": "rice . weed . unknown vegetation",
+                "thresholds": {"box": 0.35, "text": 0.25},
+                "generated_at": "2026-07-20T12:00:00Z",
+                "original_proposal": {"objects": [{"label": "plant", "score": 0.9}]},
+                "human_edit_state": "edited",
+            }
+        )
         record["review"]["reviewer_id"] = None
         self.assertInvalidContains(record, "require a human reviewer")
 
     def test_model_derived_record_requires_prompt_and_nonempty_thresholds(self) -> None:
         record = base_record()
-        record["provenance"].update({
-            "proposal_model_id": "org/model",
-            "proposal_model_revision": "rev-1",
-            "proposal_method": "model_assisted",
-            "prompt": None,
-            "thresholds": {},
-            "generated_at": "2026-07-20T12:00:00Z",
-            "original_proposal": {"objects": []},
-            "human_edit_state": "edited",
-        })
+        record["provenance"].update(
+            {
+                "proposal_model_id": "org/model",
+                "proposal_model_revision": "rev-1",
+                "proposal_method": "model_assisted",
+                "prompt": None,
+                "thresholds": {},
+                "generated_at": "2026-07-20T12:00:00Z",
+                "original_proposal": {"objects": []},
+                "human_edit_state": "edited",
+            }
+        )
         errors = validate_record(record, self.ontology)
         self.assertTrue(any("provenance.prompt: required" in error for error in errors), errors)
         self.assertTrue(any("thresholds: model-derived" in error for error in errors), errors)
 
     def test_imported_unreviewed_bbox_proposal_is_valid(self) -> None:
         record = base_record()
-        record["provenance"].update({
-            "proposal_method": "imported",
-            "original_proposal": {"source_object_id": "coco-ann-17", "bbox": [1, 2, 7, 8]},
-            "human_edit_state": "unreviewed",
-        })
+        record["provenance"].update(
+            {
+                "proposal_method": "imported",
+                "original_proposal": {"source_object_id": "coco-ann-17", "bbox": [1, 2, 7, 8]},
+                "human_edit_state": "unreviewed",
+            }
+        )
         record["review"] = {
             "annotator_id": None,
             "annotator_completed_at": None,
@@ -306,15 +323,17 @@ class AnnotationRecordValidationTests(unittest.TestCase):
 
     def test_accepted_geometry_must_match_each_label_ontology(self) -> None:
         record = base_record()
-        record["annotations"][0].update({
-            "label": "weed_target",
-            "biological_class": "weed",
-            "decision_role": "target",
-            "geometry": {
-                "type": "semantic_mask",
-                "rle": {"size": [80, 100], "counts": [0, 1, 7999]},
-            },
-        })
+        record["annotations"][0].update(
+            {
+                "label": "weed_target",
+                "biological_class": "weed",
+                "decision_role": "target",
+                "geometry": {
+                    "type": "semantic_mask",
+                    "rle": {"size": [80, 100], "counts": [0, 1, 7999]},
+                },
+            }
+        )
         self.assertInvalidContains(record, "accepted label 'weed_target' requires")
 
     def test_unusable_image_conflicts_are_rejected(self) -> None:
@@ -414,9 +433,10 @@ class PackageValidationTests(unittest.TestCase):
         record = base_record()
         package = self._write_jsonl("train.jsonl", [record])
         manifest = self.root / "test_manifest.json"
-        manifest.write_text(json.dumps({
-            "samples": [{"group_id": "capture-group-001", "split": "test"}]
-        }), encoding="utf-8")
+        manifest.write_text(
+            json.dumps({"samples": [{"group_id": "capture-group-001", "split": "test"}]}),
+            encoding="utf-8",
+        )
         errors = validate_packages(
             [package],
             ontology_path=ONTOLOGY_PATH,

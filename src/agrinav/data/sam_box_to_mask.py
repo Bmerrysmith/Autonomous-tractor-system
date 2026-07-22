@@ -54,8 +54,8 @@ reproducible and cannot be reshuffled by re-running).
 
 CLI (driven from notebooks/sam_box_to_mask_colab.ipynb as a thin driver):
 
-    python scripts/sam_box_to_mask.py \
-        --coco-zip /content/drive/.../rice_detection_for_export.v1i.coco.zip \
+    python -m agrinav.data.sam_box_to_mask \
+        --coco-zip <coco_export>.v1i.coco.zip \
         --proposals-json artifacts/detector_v1/coco_proposals_unreviewed.coco.json \
         --model-id facebook/sam2.1-hiera-large \
         --model-revision <40-hex-commit> \
@@ -168,7 +168,9 @@ def map_category(category_id: int) -> str | None:
     return COCO_CATEGORY_TO_LABEL.get(category_id)
 
 
-def clip_box(bbox: Sequence[float], width: int, height: int) -> tuple[float, float, float, float] | None:
+def clip_box(
+    bbox: Sequence[float], width: int, height: int
+) -> tuple[float, float, float, float] | None:
     """Clip a COCO ``[x, y, w, h]`` box to the image. ``None`` if degenerate.
 
     The upstream converter copies Roboflow boxes verbatim with no bounds check,
@@ -503,9 +505,7 @@ def rows_for_image(
                 "source_object_id": box["source_object_id"],
                 "coco_annotation_id": box["coco_annotation_id"],
                 "label": box["label"],
-                "prompt_box_clipped": (
-                    list(clip_box(box["bbox"], width, height) or [])
-                ),
+                "prompt_box_clipped": (list(clip_box(box["bbox"], width, height) or [])),
                 "degenerate_reason": reason,
                 "candidate_count": len(candidates),
                 "provenance": provenance,
@@ -591,9 +591,7 @@ def process(
 ) -> dict[str, Any]:
     """Run the shard. Preflight everything before the predictor is constructed."""
     if shard_count < 1 or not (0 <= shard_index < shard_count):
-        raise SamPreflightError(
-            f"invalid sharding: index {shard_index} of count {shard_count}"
-        )
+        raise SamPreflightError(f"invalid sharding: index {shard_index} of count {shard_count}")
 
     units, drops = index_proposals(proposals)
     if drops and not allow_unmapped_categories:
@@ -604,7 +602,8 @@ def process(
         )
 
     mine = [
-        u for u in units
+        u
+        for u in units
         if shard_of(f"{u['coco_image_id']}|{u['file_name']}", shard_count) == shard_index
     ]
 
@@ -640,7 +639,8 @@ def process(
     }
     for unit, image in verified:
         pending = [
-            b for b in unit["boxes"]
+            b
+            for b in unit["boxes"]
             if raw_key(str(unit["sha256"]).lower(), b["source_object_id"]) not in done
         ]
         if not pending:
@@ -671,7 +671,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         required=True,
         help="pinned immutable commit sha (^[0-9a-f]{7,40}$). 'PIN_BEFORE_RUN' is refused.",
     )
-    ap.add_argument("--out-shard", required=True, help="path or printf pattern, e.g. shard_%%03d.jsonl")
+    ap.add_argument(
+        "--out-shard", required=True, help="path or printf pattern, e.g. shard_%%03d.jsonl"
+    )
     ap.add_argument("--shard-index", type=int, default=0)
     ap.add_argument("--shard-count", type=int, default=1)
     ap.add_argument(

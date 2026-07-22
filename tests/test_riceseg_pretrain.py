@@ -22,10 +22,11 @@ import numpy as np
 import torch
 from PIL import Image
 
-from training.riceseg_pretrain import (
+import agrinav.training.riceseg_pretrain as rp
+from agrinav.training.riceseg_pretrain import (
     CLASS_NAMES,
-    ConfMat,
     NUM_CLASSES,
+    ConfMat,
     RiceSegDataset,
     RiceSegModel,
     _enforce_overfit_gate,
@@ -36,9 +37,6 @@ from training.riceseg_pretrain import (
     scan_riceseg,
     sha256_file,
 )
-
-import training.riceseg_pretrain as rp
-
 
 # The supplied RiceSEG archive extracts to a single wrapper directory that then
 # contains one directory per country; some countries add a site level.
@@ -127,7 +125,13 @@ class MaskValidationTests(unittest.TestCase):
         arr = np.zeros((8, 8), dtype=np.uint8)
         arr[0, : len(values)] = values
         Image.fromarray(arr, mode="L").save(lab)
-        pair = {"rgb": str(rgb), "label": str(lab), "country": "China", "site": "GD", "source": "China/img"}
+        pair = {
+            "rgb": str(rgb),
+            "label": str(lab),
+            "country": "China",
+            "site": "GD",
+            "source": "China/img",
+        }
         return RiceSegDataset([pair], img_size=8)
 
     def test_valid_mask_values_pass(self):
@@ -151,7 +155,13 @@ class MaskValidationTests(unittest.TestCase):
             arr = np.zeros((8, 8), dtype=np.uint8)
             arr[0, 0] = 255
             Image.fromarray(arr, mode="L").save(lab)
-            pair = {"rgb": str(rgb), "label": str(lab), "country": "China", "site": "GD", "source": "China/img"}
+            pair = {
+                "rgb": str(rgb),
+                "label": str(lab),
+                "country": "China",
+                "site": "GD",
+                "source": "China/img",
+            }
             ds = RiceSegDataset([pair], img_size=8, ignore_index=255)
             _, y = ds[0]
             self.assertEqual(int((y == 255).sum()), 1)

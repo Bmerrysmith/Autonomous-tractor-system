@@ -43,7 +43,7 @@ No heavy deps at import. Polygon export is pure-Python; RLE masks need
 
 Usage::
 
-    python scripts/export_yolo_dataset.py \
+    python -m agrinav.data.export_yolo_dataset \
         --packages artifacts/annotation/reviewed/*.jsonl \
         --images-root ~/agrinav_data/derived/images \
         --out-root artifacts/yolo/weeddet_v1 \
@@ -51,7 +51,7 @@ Usage::
 
 Contract check (no images, no cv2)::
 
-    python scripts/export_yolo_dataset.py --self-test
+    python -m agrinav.data.export_yolo_dataset --self-test
 """
 from __future__ import annotations
 
@@ -112,8 +112,7 @@ def decode_rle_to_mask(size: Sequence[int], counts: Any):
             from pycocotools import mask as coco_mask  # type: ignore
         except Exception as exc:  # pragma: no cover - optional dep
             raise ExportError(
-                "compressed RLE counts need pycocotools; install it or export "
-                "polygon geometry"
+                "compressed RLE counts need pycocotools; install it or export " "polygon geometry"
             ) from exc
         decoded = coco_mask.decode({"size": [height, width], "counts": counts.encode("ascii")})
         return decoded.astype(bool)
@@ -313,9 +312,7 @@ def record_label_lines(
                 drops.get(f"label_not_in_class_map={label!r}", 0) + 1
             )
             continue
-        line = annotation_to_line(
-            ann, cls=cls, task=task, width=width, height=height, drops=drops
-        )
+        line = annotation_to_line(ann, cls=cls, task=task, width=width, height=height, drops=drops)
         if line is not None:
             lines.append(line)
     return lines, split_dir
@@ -470,9 +467,7 @@ def export(
 
     # image list files (handy for link=none staging)
     for split_dir, items in image_lists.items():
-        (out_root / f"{split_dir}_images.txt").write_text(
-            "\n".join(items) + "\n", encoding="utf-8"
-        )
+        (out_root / f"{split_dir}_images.txt").write_text("\n".join(items) + "\n", encoding="utf-8")
 
     if include_unreviewed:
         (out_root / "UNREVIEWED_DO_NOT_TRAIN.txt").write_text(
@@ -521,21 +516,35 @@ def _record(
             "source_image_sha256": "0" * 64,
             "width": 100,
             "height": 100,
-            "country": None, "site_id": None, "field_id": None,
-            "session_id": None, "capture_pass_id": None, "frame_id": None,
-            "source_photo_id": None, "group_id": record_id,
-            "split": split, "capture_metadata": None,
+            "country": None,
+            "site_id": None,
+            "field_id": None,
+            "session_id": None,
+            "capture_pass_id": None,
+            "frame_id": None,
+            "source_photo_id": None,
+            "group_id": record_id,
+            "split": split,
+            "capture_metadata": None,
         },
         "provenance": {
-            "proposal_model_id": None, "proposal_model_revision": None,
-            "proposal_method": "manual", "prompt": None, "thresholds": None,
-            "generated_at": None, "original_proposal": None,
+            "proposal_model_id": None,
+            "proposal_model_revision": None,
+            "proposal_method": "manual",
+            "prompt": None,
+            "thresholds": None,
+            "generated_at": None,
+            "original_proposal": None,
             "human_edit_state": "human_only",
         },
         "review": {
-            "annotator_id": "a", "annotator_completed_at": None,
-            "reviewer_id": "r", "reviewed_at": None,
-            "review_status": status, "annotation_version": "1", "guide_version": "1",
+            "annotator_id": "a",
+            "annotator_completed_at": None,
+            "reviewer_id": "r",
+            "reviewed_at": None,
+            "review_status": status,
+            "annotation_version": "1",
+            "guide_version": "1",
         },
         "verified_empty": verified_empty,
         "unusable": unusable,
@@ -551,9 +560,13 @@ def _obj(label: str, geometry: dict[str, Any], edit: str | None = "accepted") ->
         "decision_role": "target" if label == "weed_target" else "protect",
         "geometry": geometry,
         "attributes": {
-            "source_object_id": None, "species": None, "growth_stage": None,
-            "occlusion": "none", "truncated": False,
-            "annotation_confidence": "certain", "treatment_eligible": None,
+            "source_object_id": None,
+            "species": None,
+            "growth_stage": None,
+            "occlusion": "none",
+            "truncated": False,
+            "annotation_confidence": "certain",
+            "treatment_eligible": None,
             "human_edit_action": edit,
         },
     }
@@ -568,32 +581,58 @@ def _self_test() -> int:
 
     records = [
         # accepted train: rice polygon + weed box + a DELETED weed (must drop)
-        _record(record_id="t1", split="train", status="accepted", annotations=[
-            _obj("rice_protect", poly),
-            _obj("weed_target", box),
-            _obj("weed_target", box, edit="deleted"),
-        ]),
+        _record(
+            record_id="t1",
+            split="train",
+            status="accepted",
+            annotations=[
+                _obj("rice_protect", poly),
+                _obj("weed_target", box),
+                _obj("weed_target", box, edit="deleted"),
+            ],
+        ),
         # adjudicated validation: weed via RLE mask (detect must decode; segment needs cv2)
-        _record(record_id="v1", split="validation", status="adjudicated", annotations=[
-            _obj("weed_target", rle),
-        ]),
+        _record(
+            record_id="v1",
+            split="validation",
+            status="adjudicated",
+            annotations=[
+                _obj("weed_target", rle),
+            ],
+        ),
         # sealed test, accepted, verified empty -> empty label (negative)
-        _record(record_id="s1", split="test", status="accepted", annotations=[],
-                verified_empty=True),
+        _record(
+            record_id="s1", split="test", status="accepted", annotations=[], verified_empty=True
+        ),
         # UNREVIEWED proposal -> must be skipped by default
-        _record(record_id="p1", split="train", status="unreviewed", annotations=[
-            _obj("weed_target", box),
-        ]),
+        _record(
+            record_id="p1",
+            split="train",
+            status="unreviewed",
+            annotations=[
+                _obj("weed_target", box),
+            ],
+        ),
         # unusable -> always skipped
         _record(record_id="u1", split="train", status="in_review", annotations=[], unusable=True),
         # unassigned split -> excluded (never dumped into train)
-        _record(record_id="x1", split="unassigned", status="accepted", annotations=[
-            _obj("weed_target", box),
-        ]),
+        _record(
+            record_id="x1",
+            split="unassigned",
+            status="accepted",
+            annotations=[
+                _obj("weed_target", box),
+            ],
+        ),
         # a label outside a reduced class map -> counted drop (tested below)
-        _record(record_id="t2", split="train", status="accepted", annotations=[
-            _obj("rice_protect", poly),
-        ]),
+        _record(
+            record_id="t2",
+            split="train",
+            status="accepted",
+            annotations=[
+                _obj("rice_protect", poly),
+            ],
+        ),
     ]
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -604,9 +643,13 @@ def _self_test() -> int:
         # DETECT export, full class map, no images (link=none).
         out_det = tmp / "yolo_detect"
         rep = export(
-            packages=[pkg], out_root=out_det, images_root=None,
-            task="detect", classes=list(DEFAULT_CLASSES),
-            include_unreviewed=False, link="none",
+            packages=[pkg],
+            out_root=out_det,
+            images_root=None,
+            task="detect",
+            classes=list(DEFAULT_CLASSES),
+            include_unreviewed=False,
+            link="none",
         )
         assert rep["gating"] == "truth_only", rep
         # train: t1 (rice+weed, deleted dropped) + t2 (rice) = 2 images, 3 objects
@@ -615,7 +658,9 @@ def _self_test() -> int:
         # val: v1 RLE weed decoded to a box = 1 object
         assert rep["per_split"]["val"]["objects"] == 1, rep["per_split"]
         # test: s1 verified-empty negative = 1 image, 0 objects, 1 empty
-        assert rep["per_split"]["test"] == {"images": 1, "objects": 0, "empty_images": 1}, rep["per_split"]
+        assert rep["per_split"]["test"] == {"images": 1, "objects": 0, "empty_images": 1}, rep[
+            "per_split"
+        ]
         assert rep["drops"].get("deleted_object") == 1, rep["drops"]
         assert any(k.startswith("not_truth_review_status=") for k in rep["drops"]), rep["drops"]
         assert rep["drops"].get("unusable") == 1, rep["drops"]
@@ -623,8 +668,13 @@ def _self_test() -> int:
         # data.yaml + label content sanity
         yaml_text = (out_det / "data.yaml").read_text(encoding="utf-8")
         assert "task: detect" in yaml_text and "0: rice_protect" in yaml_text
-        t1_label = (out_det / "labels" / "train" / "t1.txt").read_text(encoding="utf-8").strip().splitlines()
-        assert len(t1_label) == 2 and all(len(l.split()) == 5 for l in t1_label), t1_label
+        t1_label = (
+            (out_det / "labels" / "train" / "t1.txt")
+            .read_text(encoding="utf-8")
+            .strip()
+            .splitlines()
+        )
+        assert len(t1_label) == 2 and all(len(line.split()) == 5 for line in t1_label), t1_label
         s1_label = (out_det / "labels" / "test" / "s1.txt").read_text(encoding="utf-8")
         assert s1_label == "", repr(s1_label)  # empty negative
 
@@ -632,23 +682,36 @@ def _self_test() -> int:
         # in v1 needs opencv; degrade to a counted skip if unavailable.
         out_seg = tmp / "yolo_seg"
         rep2 = export(
-            packages=[pkg], out_root=out_seg, images_root=None,
-            task="segment", classes=["rice_protect", "weed_target"],
-            include_unreviewed=False, link="none",
+            packages=[pkg],
+            out_root=out_seg,
+            images_root=None,
+            task="segment",
+            classes=["rice_protect", "weed_target"],
+            include_unreviewed=False,
+            link="none",
         )
         # weed box in t1 has no mask -> must be a counted skip, not a fake polygon
         assert rep2["drops"].get("bbox_only_in_segment_mode", 0) >= 1, rep2["drops"]
         # rice polygon still exported
-        t1_seg = (out_seg / "labels" / "train" / "t1.txt").read_text(encoding="utf-8").strip().splitlines()
+        t1_seg = (
+            (out_seg / "labels" / "train" / "t1.txt")
+            .read_text(encoding="utf-8")
+            .strip()
+            .splitlines()
+        )
         assert len(t1_seg) == 1 and t1_seg[0].startswith("0 "), t1_seg
         assert len(t1_seg[0].split()) >= 7, t1_seg  # cls + >=3 xy pairs
 
         # INCLUDE-UNREVIEWED escape hatch stamps the marker + weakens gate.
         out_un = tmp / "yolo_unrev"
         rep3 = export(
-            packages=[pkg], out_root=out_un, images_root=None,
-            task="detect", classes=list(DEFAULT_CLASSES),
-            include_unreviewed=True, link="none",
+            packages=[pkg],
+            out_root=out_un,
+            images_root=None,
+            task="detect",
+            classes=list(DEFAULT_CLASSES),
+            include_unreviewed=True,
+            link="none",
         )
         assert rep3["gating"].startswith("UNREVIEWED"), rep3
         assert (out_un / "UNREVIEWED_DO_NOT_TRAIN.txt").is_file()
@@ -714,7 +777,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--self-test", action="store_true", help="run the contract check and exit")
     ap.add_argument("--packages", nargs="+", help="JSONL annotation package(s); globs ok")
     ap.add_argument("--out-root", type=Path, help="output dataset root")
-    ap.add_argument("--images-root", type=Path, default=None, help="base dir to resolve source images")
+    ap.add_argument(
+        "--images-root", type=Path, default=None, help="base dir to resolve source images"
+    )
     ap.add_argument("--task", choices=["detect", "segment"], default="segment")
     ap.add_argument(
         "--classes",

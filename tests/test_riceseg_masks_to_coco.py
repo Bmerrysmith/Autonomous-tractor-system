@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from scripts.riceseg_masks_to_coco import (
+from agrinav.data.riceseg_masks_to_coco import (
     RICESEG_TO_CANONICAL,
     WEED_CANONICAL_ID,
     mask_to_instances,
@@ -16,7 +16,7 @@ from scripts.riceseg_masks_to_coco import (
 class MaskToInstancesTests(unittest.TestCase):
     def test_rice_and_weed_blobs_become_separate_instances(self):
         mask = np.zeros((64, 64), dtype=np.uint8)
-        mask[5:25, 5:25] = 1   # green_rice -> rice_protect
+        mask[5:25, 5:25] = 1  # green_rice -> rice_protect
         mask[40:60, 40:60] = 4  # weed -> weed_target
         inst = mask_to_instances(mask, min_area=16)
         cats = sorted(i["category_id"] for i in inst)
@@ -55,11 +55,11 @@ class MaskToInstancesTests(unittest.TestCase):
 class ProvenanceTests(unittest.TestCase):
     def test_member_country_site_both_shapes(self):
         self.assertEqual(
-            member_country_site("global rice segmentation/China/GD/rgb/x.jpg"),
-            ("China", "GD"))
+            member_country_site("global rice segmentation/China/GD/rgb/x.jpg"), ("China", "GD")
+        )
         self.assertEqual(
-            member_country_site("global rice segmentation/India/rgb/x.jpg"),
-            ("India", None))
+            member_country_site("global rice segmentation/India/rgb/x.jpg"), ("India", None)
+        )
 
     def test_source_photo_id_strips_tile_suffix(self):
         self.assertEqual(source_photo_id("IMG_5014_subset_overlap_0_4"), "IMG_5014")

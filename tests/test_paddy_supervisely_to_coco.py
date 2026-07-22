@@ -2,7 +2,7 @@
 
 import unittest
 
-from scripts.paddy_supervisely_to_coco import (
+from agrinav.data.paddy_supervisely_to_coco import (
     RICE_PROTECT_ID,
     polygon_area,
     session_of,
@@ -19,10 +19,15 @@ class PaddyConverterTests(unittest.TestCase):
         self.assertAlmostEqual(polygon_area([[0, 0], [10, 0], [10, 10], [0, 10]]), 100.0)
 
     def test_panicle_polygon_becomes_rice_protect(self):
-        ann = {"objects": [{
-            "classTitle": "panicle", "geometryType": "polygon",
-            "points": {"exterior": [[0, 0], [20, 0], [20, 20], [0, 20]], "interior": []},
-        }]}
+        ann = {
+            "objects": [
+                {
+                    "classTitle": "panicle",
+                    "geometryType": "polygon",
+                    "points": {"exterior": [[0, 0], [20, 0], [20, 20], [0, 20]], "interior": []},
+                }
+            ]
+        }
         frags = supervisely_objects_to_annotations(ann)
         self.assertEqual(len(frags), 1)
         self.assertEqual(frags[0]["category_id"], RICE_PROTECT_ID)
@@ -30,11 +35,16 @@ class PaddyConverterTests(unittest.TestCase):
         self.assertAlmostEqual(frags[0]["area"], 400.0)
 
     def test_non_polygon_and_tiny_are_skipped(self):
-        ann = {"objects": [
-            {"classTitle": "panicle", "geometryType": "bitmap", "points": {"exterior": []}},
-            {"classTitle": "panicle", "geometryType": "polygon",
-             "points": {"exterior": [[0, 0], [2, 0], [2, 2], [0, 2]]}},  # area 4 < 16
-        ]}
+        ann = {
+            "objects": [
+                {"classTitle": "panicle", "geometryType": "bitmap", "points": {"exterior": []}},
+                {
+                    "classTitle": "panicle",
+                    "geometryType": "polygon",
+                    "points": {"exterior": [[0, 0], [2, 0], [2, 2], [0, 2]]},
+                },  # area 4 < 16
+            ]
+        }
         self.assertEqual(supervisely_objects_to_annotations(ann, min_area=16), [])
 
 
