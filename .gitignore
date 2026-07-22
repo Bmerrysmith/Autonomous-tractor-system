@@ -10,6 +10,11 @@ venv/
 coverage.xml
 htmlcov/
 
+# Python build / editable-install artifacts
+build/
+dist/
+*.egg-info/
+
 # Secrets and machine-local configuration
 .env
 .env.*
