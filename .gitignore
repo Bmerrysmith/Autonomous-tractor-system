@@ -48,3 +48,13 @@ node_modules/
 package.json
 package-lock.json
 *.b64
+
+# Claude Code machine-local settings (agent definitions ARE tracked, this is not)
+.claude/settings.local.json
+
+# Archived course-deliverable binaries and figures — provenance recorded in
+# _archive/README.md and docs/ARTIFACT_INVENTORY.md; the bytes live in the
+# external artifact store, not Git (per the no-bulk-in-Git policy).
+_archive/historical_docs/reports/
+_archive/historical_docs/images/
+_archive/historical_docs/*.docx
