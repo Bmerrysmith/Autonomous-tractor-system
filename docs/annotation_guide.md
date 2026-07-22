@@ -187,6 +187,15 @@ python -B scripts\validate_annotation_package.py artifacts\annotation_v1\annotat
   --manifest data\manifests\split-v1.json
 ```
 
+### End-to-end automated pipeline
+
+For the scripted open-vocabulary → SAM → review → **YOLOv8/v11 export** loop
+(box proposals via [`scripts/locateanything_to_proposals.py`](../scripts/locateanything_to_proposals.py)
+and dataset export via [`scripts/export_yolo_dataset.py`](../scripts/export_yolo_dataset.py)),
+see the runbook in [`automated_annotation_pipeline.md`](automated_annotation_pipeline.md).
+Both ends emit or consume *proposals*; only the human review stage in this
+section mints truth, and the exporter is truth-only by default.
+
 ## 9. Quality metrics and provisional gates
 
 Report full distributions by class, object size, source group, hard condition, annotator, and proposal method.
