@@ -233,13 +233,22 @@ def main(argv=None):
         'source-photo leak between train and val'
 
     weights = compute_class_weights(train_p).to(device)
+
+    # persistent_workers keeps the worker pool alive across epochs instead of
+    # respawning it at every boundary. On Windows each respawn is a full
+    # process spawn that re-imports this module, so a mid-run change to any
+    # imported source file turns into a crash at the next epoch rather than
+    # being ignored. (That is exactly how a OneDrive sync silently reverting
+    # riceseg_pretrain.py first surfaced here -- three epochs in.) Spawning
+    # once shrinks that window to startup.
+    common = dict(num_workers=args.num_workers)
+    if args.num_workers > 0:
+        common['persistent_workers'] = True
     tl = DataLoader(RiceSegDataset(train_p, args.img_size, augment=True),
-                    batch_size=args.batch_size, shuffle=True,
-                    num_workers=args.num_workers, pin_memory=True,
-                    drop_last=len(train_p) > args.batch_size)
+                    batch_size=args.batch_size, shuffle=True, pin_memory=True,
+                    drop_last=len(train_p) > args.batch_size, **common)
     vl = DataLoader(RiceSegDataset(val_p, args.img_size),
-                    batch_size=args.batch_size, shuffle=False,
-                    num_workers=args.num_workers)
+                    batch_size=args.batch_size, shuffle=False, **common)
 
     model, prov = build_model(args.arch, NUM_CLASSES, args.hf_revision,
                               pretrained=not args.no_pretrained)

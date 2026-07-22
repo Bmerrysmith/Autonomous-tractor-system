@@ -1,0 +1,541 @@
+{
+  "schema_version": "agrinav.baseline_seg_control.run.v1",
+  "role": "CONTROL \u2014 measures whether the custom Det-ResNet-50 architecture is the bottleneck. NOT a WeedDet backbone; do not load with load_riceseg_backbone().",
+  "seed": 42,
+  "git_commit": "917991b2b94291b8100e54af0d3c0ef860a3bfbd",
+  "environment": {
+    "python": "3.12.13",
+    "torch": "2.11.0+cu128",
+    "numpy": "2.0.2",
+    "torchvision": "0.26.0+cu128"
+  },
+  "device": "cuda",
+  "model": {
+    "arch": "deeplabv3_resnet50",
+    "model_id": "torchvision/deeplabv3_resnet50",
+    "revision": "COCO_WITH_VOC_LABELS_V1",
+    "pretrained_on": "ImageNet backbone + COCO(VOC labels) segmentation head",
+    "head_reinitialised": true,
+    "params": 41996364
+  },
+  "config": {
+    "data_root": "/content/RiceSEG",
+    "arch": "deeplabv3_resnet50",
+    "out": "/content/drive/MyDrive/agrinav_data/out/baseline_deeplabv3_resnet50.json",
+    "epochs": 30,
+    "batch_size": 8,
+    "img_size": 512,
+    "lr": 0.0003,
+    "val_ratio": 0.1,
+    "holdout_country": null,
+    "seed": 42,
+    "hf_revision": null,
+    "no_pretrained": false,
+    "stability_window": 5,
+    "num_workers": 2
+  },
+  "data": {
+    "tiles": 3078,
+    "train_tiles": 2769,
+    "val_tiles": 309,
+    "countries": [
+      "China",
+      "India",
+      "Japan",
+      "Philippines",
+      "Tanzania"
+    ],
+    "holdout_country": null
+  },
+  "best": {
+    "epoch": 29,
+    "miou_present_classes": 0.6170212214422712,
+    "per_class_iou": {
+      "background": 0.8584385595056697,
+      "green_veg": 0.8722464016988788,
+      "senescent": 0.3590954321540758,
+      "panicle": 0.7539201211913817,
+      "weeds": 0.49275648000846695,
+      "duckweed": 0.3656703340951543
+    },
+    "absent_classes": []
+  },
+  "stability": {
+    "window": 5,
+    "epochs": [
+      26,
+      27,
+      28,
+      29,
+      30
+    ],
+    "miou_mean": 0.615240449215373,
+    "miou_std": 0.0015903787186961331,
+    "per_class": {
+      "background": {
+        "mean": 0.8585766596386197,
+        "std": 0.0007760882995341647,
+        "min": 0.857256338467257,
+        "max": 0.8596272903410179,
+        "n": 5
+      },
+      "green_veg": {
+        "mean": 0.8715673156374113,
+        "std": 0.0004603129184619054,
+        "min": 0.8711359683953666,
+        "max": 0.8722464016988788,
+        "n": 5
+      },
+      "senescent": {
+        "mean": 0.3604736166844078,
+        "std": 0.003661552546396025,
+        "min": 0.3564102604580235,
+        "max": 0.3672577535796014,
+        "n": 5
+      },
+      "panicle": {
+        "mean": 0.7510135016419003,
+        "std": 0.002064177933735594,
+        "min": 0.748583345926684,
+        "max": 0.7539201211913817,
+        "n": 5
+      },
+      "weeds": {
+        "mean": 0.4830803295804034,
+        "std": 0.0063024079503640595,
+        "min": 0.4729180126821815,
+        "max": 0.49275648000846695,
+        "n": 5
+      },
+      "duckweed": {
+        "mean": 0.3667312721094958,
+        "std": 0.006334931363755158,
+        "min": 0.3549072263973538,
+        "max": 0.37221800129677435,
+        "n": 5
+      }
+    }
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "loss": 1.1112615605654743,
+      "miou": 0.3675678258016484,
+      "per_class_iou": {
+        "background": 0.717067461033852,
+        "green_veg": 0.6938434026300184,
+        "senescent": 0.17194128928211294,
+        "panicle": 0.46457429814232437,
+        "weeds": 0.13043946029801254,
+        "duckweed": 0.02754104342357005
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 2,
+      "loss": 0.8419846720089114,
+      "miou": 0.4101541016386731,
+      "per_class_iou": {
+        "background": 0.8001238449064966,
+        "green_veg": 0.8035835627253753,
+        "senescent": 0.19229594765367056,
+        "panicle": 0.5265246930236384,
+        "weeds": 0.06577694435578253,
+        "duckweed": 0.07261961716707502
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 3,
+      "loss": 0.7721451932639745,
+      "miou": 0.45808910189325736,
+      "per_class_iou": {
+        "background": 0.8214633470219306,
+        "green_veg": 0.8112951336456046,
+        "senescent": 0.2068769229737026,
+        "panicle": 0.6028943377757647,
+        "weeds": 0.23727692321697888,
+        "duckweed": 0.0687279467255627
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 4,
+      "loss": 0.686230325974481,
+      "miou": 0.35660948941083054,
+      "per_class_iou": {
+        "background": 0.8158549242292528,
+        "green_veg": 0.7413713801171559,
+        "senescent": 0.28047122830650256,
+        "panicle": 0.2298514530007035,
+        "weeds": 0.05176155580608794,
+        "duckweed": 0.02034639500528082
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 5,
+      "loss": 0.6659673713362975,
+      "miou": 0.5055443676877847,
+      "per_class_iou": {
+        "background": 0.8323491171360641,
+        "green_veg": 0.8366063794129062,
+        "senescent": 0.3080610672147749,
+        "panicle": 0.5883271055545803,
+        "weeds": 0.2501142443701834,
+        "duckweed": 0.2178082924381989
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 6,
+      "loss": 0.6397635293316979,
+      "miou": 0.4730151527824926,
+      "per_class_iou": {
+        "background": 0.8367488986671466,
+        "green_veg": 0.7950870124757686,
+        "senescent": 0.3032246435300352,
+        "panicle": 0.5824029328445259,
+        "weeds": 0.15994511904566291,
+        "duckweed": 0.16068231013181644
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 7,
+      "loss": 0.6168668332988816,
+      "miou": 0.5131189738953946,
+      "per_class_iou": {
+        "background": 0.8281448433583573,
+        "green_veg": 0.8372542162619683,
+        "senescent": 0.31124797713147745,
+        "panicle": 0.6191564541480427,
+        "weeds": 0.2614502214047054,
+        "duckweed": 0.22146013106781723
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 8,
+      "loss": 0.589240334712701,
+      "miou": 0.49940054938761297,
+      "per_class_iou": {
+        "background": 0.8423183065298395,
+        "green_veg": 0.8273140290113333,
+        "senescent": 0.28899399404466614,
+        "panicle": 0.6400239415552796,
+        "weeds": 0.1974115906854485,
+        "duckweed": 0.20034143449911085
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 9,
+      "loss": 0.5640053314969719,
+      "miou": 0.5189452800105472,
+      "per_class_iou": {
+        "background": 0.8399982306165809,
+        "green_veg": 0.837902849378064,
+        "senescent": 0.3059290458101629,
+        "panicle": 0.6941471264864398,
+        "weeds": 0.27724502143754526,
+        "duckweed": 0.15844940633448998
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 10,
+      "loss": 0.5650413380020616,
+      "miou": 0.5515069932091708,
+      "per_class_iou": {
+        "background": 0.8454730871418771,
+        "green_veg": 0.8478785319819093,
+        "senescent": 0.3321970901574177,
+        "panicle": 0.6685532131631874,
+        "weeds": 0.3018531370960994,
+        "duckweed": 0.3130868997145343
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 11,
+      "loss": 0.5592139207386557,
+      "miou": 0.5514736796285593,
+      "per_class_iou": {
+        "background": 0.8424944855499162,
+        "green_veg": 0.8565045849477583,
+        "senescent": 0.3545303241148145,
+        "panicle": 0.6735255529590543,
+        "weeds": 0.3684446203190736,
+        "duckweed": 0.21334250988073883
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 12,
+      "loss": 0.5157200335767228,
+      "miou": 0.5827347591724938,
+      "per_class_iou": {
+        "background": 0.8471061899383534,
+        "green_veg": 0.8643295295060253,
+        "senescent": 0.31103683897801543,
+        "panicle": 0.7303146536575374,
+        "weeds": 0.48387110813504464,
+        "duckweed": 0.25975023481998677
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 13,
+      "loss": 0.5030534290681684,
+      "miou": 0.5475632278196514,
+      "per_class_iou": {
+        "background": 0.8438294148807346,
+        "green_veg": 0.859660388115115,
+        "senescent": 0.3495862809896586,
+        "panicle": 0.6870342631720311,
+        "weeds": 0.4154556668772753,
+        "duckweed": 0.1298133528830939
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 14,
+      "loss": 0.5084521966862541,
+      "miou": 0.5101343104743677,
+      "per_class_iou": {
+        "background": 0.8366975268964022,
+        "green_veg": 0.8411492461618753,
+        "senescent": 0.32842045486092003,
+        "panicle": 0.6617854633201624,
+        "weeds": 0.30481959308371137,
+        "duckweed": 0.0879335785231352
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 15,
+      "loss": 0.5150876730852734,
+      "miou": 0.5688786311877698,
+      "per_class_iou": {
+        "background": 0.8505973868345226,
+        "green_veg": 0.8577148265367681,
+        "senescent": 0.34613443320080584,
+        "panicle": 0.7136076410348244,
+        "weeds": 0.39141341693312776,
+        "duckweed": 0.25380408258656995
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 16,
+      "loss": 0.4870948328964972,
+      "miou": 0.5735521499016929,
+      "per_class_iou": {
+        "background": 0.8536350704378639,
+        "green_veg": 0.857405323250049,
+        "senescent": 0.33387692485645765,
+        "panicle": 0.7352958719994364,
+        "weeds": 0.3507975544921121,
+        "duckweed": 0.31030215437423786
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 17,
+      "loss": 0.46641839360226095,
+      "miou": 0.5914349135126543,
+      "per_class_iou": {
+        "background": 0.8509692636286122,
+        "green_veg": 0.8675390452680032,
+        "senescent": 0.3661743439241206,
+        "panicle": 0.7230702759580513,
+        "weeds": 0.5022735881073651,
+        "duckweed": 0.23858296418977282
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 18,
+      "loss": 0.44986948418307166,
+      "miou": 0.5839218089455195,
+      "per_class_iou": {
+        "background": 0.8550252933025364,
+        "green_veg": 0.8630747711702259,
+        "senescent": 0.3558794594160814,
+        "panicle": 0.7389515273265687,
+        "weeds": 0.39904368453792965,
+        "duckweed": 0.29155611791977476
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 19,
+      "loss": 0.43685487352010144,
+      "miou": 0.5905221945170305,
+      "per_class_iou": {
+        "background": 0.8539262854069188,
+        "green_veg": 0.8695464589270904,
+        "senescent": 0.3536621030918187,
+        "panicle": 0.7395028561276186,
+        "weeds": 0.4718199308714219,
+        "duckweed": 0.254675532677315
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 20,
+      "loss": 0.42738252809281985,
+      "miou": 0.6072561460864915,
+      "per_class_iou": {
+        "background": 0.8570895903337289,
+        "green_veg": 0.8693645869461176,
+        "senescent": 0.35865693303397,
+        "panicle": 0.7427596159010191,
+        "weeds": 0.4547698342171788,
+        "duckweed": 0.3608963160869342
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 21,
+      "loss": 0.41748233695078446,
+      "miou": 0.5951690144242068,
+      "per_class_iou": {
+        "background": 0.8553970967546809,
+        "green_veg": 0.8625095333306658,
+        "senescent": 0.3506018691858324,
+        "panicle": 0.7234532114749003,
+        "weeds": 0.40780179896482804,
+        "duckweed": 0.37125057683433316
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 22,
+      "loss": 0.4063256807582227,
+      "miou": 0.6157205520512955,
+      "per_class_iou": {
+        "background": 0.8573913223858072,
+        "green_veg": 0.8718310608991361,
+        "senescent": 0.3656352553607837,
+        "panicle": 0.746058407324872,
+        "weeds": 0.490337088546286,
+        "duckweed": 0.3630701777908879
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 23,
+      "loss": 0.3973606882584577,
+      "miou": 0.6142060433164219,
+      "per_class_iou": {
+        "background": 0.8562854729414777,
+        "green_veg": 0.8721282752909719,
+        "senescent": 0.36177123081018725,
+        "panicle": 0.7506388902739096,
+        "weeds": 0.499818110336606,
+        "duckweed": 0.3445942802453792
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 24,
+      "loss": 0.3903808191935451,
+      "miou": 0.6042572870645597,
+      "per_class_iou": {
+        "background": 0.8569694226424562,
+        "green_veg": 0.8702231872660183,
+        "senescent": 0.3583936021973874,
+        "panicle": 0.7531283738339155,
+        "weeds": 0.4662306335833423,
+        "duckweed": 0.3205985028642386
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 25,
+      "loss": 0.38497509053676804,
+      "miou": 0.6139676043242167,
+      "per_class_iou": {
+        "background": 0.8571842522655176,
+        "green_veg": 0.8724074496506492,
+        "senescent": 0.35864469796392345,
+        "panicle": 0.7504592686715787,
+        "weeds": 0.5022558094546572,
+        "duckweed": 0.34285414793897445
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 26,
+      "loss": 0.3763415359951168,
+      "miou": 0.6124389643306768,
+      "per_class_iou": {
+        "background": 0.857256338467257,
+        "green_veg": 0.8711359683953666,
+        "senescent": 0.3672577535796014,
+        "panicle": 0.7511584864623004,
+        "weeds": 0.4729180126821815,
+        "duckweed": 0.3549072263973538
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 27,
+      "loss": 0.3739664720403666,
+      "miou": 0.6146865833777405,
+      "per_class_iou": {
+        "background": 0.8589570119325995,
+        "green_veg": 0.8711525770411686,
+        "senescent": 0.3564102604580235,
+        "panicle": 0.748583345926684,
+        "weeds": 0.48364700122586773,
+        "duckweed": 0.3693693036820999
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 28,
+      "loss": 0.3746778625198182,
+      "miou": 0.6158269413317569,
+      "per_class_iou": {
+        "background": 0.8596272903410179,
+        "green_veg": 0.8713144607826755,
+        "senescent": 0.36072394305595273,
+        "panicle": 0.7488675744795056,
+        "weeds": 0.4822103780346154,
+        "duckweed": 0.37221800129677435
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 29,
+      "loss": 0.3661972270966265,
+      "miou": 0.6170212214422712,
+      "per_class_iou": {
+        "background": 0.8584385595056697,
+        "green_veg": 0.8722464016988788,
+        "senescent": 0.3590954321540758,
+        "panicle": 0.7539201211913817,
+        "weeds": 0.49275648000846695,
+        "duckweed": 0.3656703340951543
+      },
+      "absent_classes": []
+    },
+    {
+      "epoch": 30,
+      "loss": 0.3628569003732907,
+      "miou": 0.6162285355944197,
+      "per_class_iou": {
+        "background": 0.8586040979465542,
+        "green_veg": 0.8719871702689669,
+        "senescent": 0.3588806941743855,
+        "panicle": 0.7525379801496296,
+        "weeds": 0.4838697759508854,
+        "duckweed": 0.3714914950760967
+      },
+      "absent_classes": []
+    }
+  ]
+}
