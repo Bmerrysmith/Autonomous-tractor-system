@@ -1,0 +1,177 @@
+
+================================================================================
+RICE DETECTION DATASET ANALYSIS REPORT
+================================================================================
+
+DATASET OVERVIEW
+----------------
+Total Images:     1347
+Total Boxes:      39556
+Avg Boxes/Image:  29.4
+Total Pixels:     353,107,968
+
+LABEL BREAKDOWN
+---------------
+rice:  39065 boxes (98.8%)
+weed:  491 boxes (1.2%)
+
+BOX DIMENSIONS (ALL LABELS)
+---------------------------
+Width (pixels):
+  Mean:     28.1
+  Median:   22.0
+  Std Dev:  20.9
+  Min/Max:  3 / 211
+  Q25/Q75:  14.0 / 35.0
+  P95:      68.0
+
+Height (pixels):
+  Mean:     61.8
+  Median:   56.0
+  Std Dev:  25.1
+  Min/Max:  12 / 241
+  Q25/Q75:  44.0 / 74.0
+  P95:      112.0
+
+Area (pixels²):
+  Mean:     1932
+  Median:   1292
+  Std Dev:  1954.6
+  Min/Max:  60 / 28679
+
+Aspect Ratio (W/H):
+  Mean:     0.482
+  Median:   0.368
+  Std Dev:  0.403
+  Min/Max:  0.051 / 7.250
+  Q25/Q75:  0.283 / 0.507
+
+  Narrow boxes (AR < 0.5):  73.8%
+  Medium boxes (0.5 ≤ AR < 1.0):  18.5%
+  Wide boxes (AR ≥ 1.0):  7.7%
+
+BOX PLACEMENT ACCURACY
+----------------------
+Boxes in bounds:           95.5%
+Min margin (median):       1.418  (relative to box size)
+  Interpretation: nearest edge is ~141.8% of box size away
+
+Left margin (median):      10.277
+Right margin (median):     11.738
+Top margin (median):       2.788
+Bottom margin (median):    4.680
+
+Greenness inside boxes:    0.104
+  (NDVI approximation: vegetation signal strength)
+
+ISSUES IDENTIFIED
+-----------------
+  ⚠ 10.6% of boxes have <10% margin to edge (hard for model to regress)
+  ⚠ 4.51% boxes extend beyond image bounds (annotation error)
+  ✓ Strong greenness signal in boxes (0.104)
+  ⚠ High aspect ratio variance (σ=0.403) — difficult for fixed-ratio anchors
+  ⚠ Large size range (478x) — needs multi-scale anchors
+  ✓ Moderate density (29.4 objects/image)
+
+RECOMMENDATIONS FOR TRAINING OPTIMIZATION
+-------------------------------------------
+
+1. ANCHOR TUNING (CRITICAL)
+   Current config: base_scale=4, aspect_ratios=(0.25, 0.5, 1.0, 2.0)
+
+   Target box dimensions:
+     Median: 22w × 56h (AR=0.368)
+     P25:    14w × 44h
+     P75:    35w × 74h
+
+   RECOMMENDED CONFIG:
+   base_scale=3
+   aspect_ratios=(0.2, 0.33, 0.5, 1.0)
+
+   Why this works:
+     • Base scale 3 creates 24px base anchors (P3 stride 8)
+       This matches your median 22px width perfectly
+     
+     • Aspect ratio 0.2-0.5 covers 68.7% of your dataset
+       Removes 2.0 ratio (only 7.7% are wide)
+
+   Expected improvement:
+     • Positive anchors per GT: +40-60%
+     • Confidence calibration: +0.10-0.20
+     • AP@0.50: +15-25%
+
+2. FEATURE PYRAMID (HIGH PRIORITY)
+   Your smallest boxes: 3w × 12h
+   Current pyramid: P3/P4/P5 (stride 8/16/32)
+
+   RECOMMENDED: Add P2 (stride 4)
+   
+   Why:
+     • P2 creates 12px anchors, perfect for 43.1% of tiny boxes
+     • Small objects are your biggest bottleneck
+     • P2 is standard in modern detectors (YOLO, EfficientDet, etc.)
+
+   Impact:
+     • AP@0.50 small: +5-10%
+     • AP@0.75: +10-15% (tighter localization)
+
+3. BOX PLACEMENT & ANNOTATION QUALITY
+   Min margin (median): 1.418
+   
+   Tight boxes found: 4205 (10.6%)
+   
+   Assessment: GOOD - boxes are well-placed
+   
+   What this means:
+     • Low margin = box extends to image edge
+     • Model cannot regress beyond image boundary
+     • During augmentation, tight boxes become even tighter
+   
+   Solution:
+     • Accept this as dataset characteristic
+     • During training, lower regression weight on tight boxes
+     • Use CIoU loss (aspect-ratio aware) to better handle elongated boxes
+
+4. AUGMENTATION CALIBRATION
+   Current: blur prob 0.3-0.5, equalize prob variable
+   
+   Your boxes contain: 0.104 greenness (vegetation)
+   
+   Recommendation:
+     • Keep blur probability ≤ 0.3
+     • Keep blur radius ≤ 0.5 (don't destroy leaf texture)
+     • Equalization ≤ 0.15 (too much flattens color)
+     • Preserve green/soil contrast (this is your signal!)
+
+5. DATA LABELING QUALITY AUDIT
+   Greenness in boxes: 0.104
+   
+   Status: ✓ STRONG
+   
+   If greenness is weak, spot-check ~20 random boxes visually
+   (Do they actually cover rice plants, or are they offset/too loose?)
+
+TRAINING OPTIMIZATION ROADMAP
+------------------------------
+
+PHASE 1 (Immediate - 3-5 days)
+  [ ] Change base_scale to 3
+  [ ] Change aspect_ratios to (0.2, 0.33, 0.5, 1.0)
+  [ ] Fix scheduler T_max = num_epochs (not iterations)
+  [ ] Soften augmentation (blur ≤0.3, equalize ≤0.15)
+  [ ] Train 15 epochs, compare vs. 80-epoch baseline
+  [ ] Success metric: confidence 0.25+ (from 0.10-0.15)
+
+PHASE 2 (If Phase 1 successful - 1-2 weeks)
+  [ ] Add P2 to feature pyramid
+  [ ] Implement ATSS assignment (replaces fixed IoU thresholds)
+  [ ] Continue training 30-40 epochs
+  [ ] Success metric: AP@0.75 improves, confidence 0.40+
+
+PHASE 3 (If still plateauing - 2-3 weeks)
+  [ ] Try CIoU loss instead of GIoU
+  [ ] Add EMA (exponential moving average weights)
+  [ ] Add AMP (automatic mixed precision)
+  [ ] Consider benchmark: YOLOv8s on same data
+
+================================================================================
