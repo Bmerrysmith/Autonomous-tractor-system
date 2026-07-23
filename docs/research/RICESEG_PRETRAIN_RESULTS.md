@@ -232,3 +232,38 @@ doing — but it is now the *second* lever, not the first.
 history, stability block each).
 
 ---
+
+## Training knobs added 2026-07-23 (seg pipeline diagnosis, items 1–3)
+
+`riceseg_pretrain.py` gained optimisation levers. **Defaults reproduce the old
+recipe except checkpoint selection.** Recommended optimised command:
+
+```
+python -m agrinav.training.riceseg_pretrain \
+  --data-root <RiceSEG> --out out/riceseg_backbone.pth \
+  --epochs 30 --batch-size 8 --img-size 512 --seed 42 \
+  --loss focal_tversky --warmup-epochs 2 --backbone-lr-mult 0.1 \
+  --select-metric minority
+```
+
+- **Checkpoint selection (default changed).** Exports by an EMA-smoothed mean IoU
+  over `--select-classes weeds,duckweed,senescent` instead of single-epoch mIoU
+  (which was dominated by background/green_veg ~0.87 and picked noisy weed
+  peaks). `--select-metric miou` reproduces prior runs; the overfit gate always
+  uses `miou`. New `selection`/`stability` blocks appear in the run manifest.
+- **Loss (opt-in).** `--loss focal_tversky` (α0.3/β0.7/γ1.33, background excluded)
+  for minority recall; or `--dice-weighted --dice-ignore-bg` on the CE+Dice loss.
+  `baseline_seg_control` keeps plain `SegLoss` so the A/B stays comparable.
+- **LR (opt-in).** `--warmup-epochs` linear warmup + `--backbone-lr-mult` give the
+  backbone a smaller step than the fresh head; damps the early weed oscillation.
+- **Recipe parity.** New-API AMP + `--num-workers`/persistent workers now match
+  `baseline_seg_control`. **Batch size remains a confound** in the recorded A/B
+  (custom bs 12 vs DeepLabV3 bs 8) — match it (both 8) before citing the delta.
+- **Ceiling caveat.** These are model-side levers for **weeds** + stability.
+  duckweed/senescent ~0.36 for *both* architectures is a **data** ceiling — needs
+  more real minority instances, not loss/LR tricks.
+
+Smoke-tested on synthetic CPU tiles (both loss paths + both selection metrics run
+end-to-end; manifest + resumable checkpoint written). No full RiceSEG re-run yet.
+
+---

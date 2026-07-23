@@ -70,6 +70,7 @@ from agrinav.training.riceseg_pretrain import (
     compute_class_weights,
     scan_riceseg,
     split_pairs,
+    stability_stats,
 )
 
 ARCHS = ("deeplabv3_resnet50", "segformer_b2")
@@ -157,37 +158,9 @@ def build_model(arch, num_classes=NUM_CLASSES, hf_revision=None, pretrained=True
     raise SystemExit(f"unknown --arch {arch!r}; choose from {ARCHS}")
 
 
-# ================================================================ stability
-def stability_stats(history, window=5, class_names=CLASS_NAMES):
-    """Mean/std of mIoU and per-class IoU over the final `window` epochs.
-
-    Pure function (no torch, no IO) so it is unit-testable. Classes absent from
-    an epoch are recorded as None by the training loop; they are skipped rather
-    than counted as zero, which would fabricate a low score for a class that was
-    simply not present in that epoch's validation pass.
-    """
-    if not history:
-        return {}
-    tail = history[-max(1, int(window)) :]
-    mious = [h["miou"] for h in tail if h.get("miou") is not None and not np.isnan(h["miou"])]
-    out = {
-        "window": len(tail),
-        "epochs": [h["epoch"] for h in tail],
-        "miou_mean": float(np.mean(mious)) if mious else None,
-        "miou_std": float(np.std(mious)) if mious else None,
-        "per_class": {},
-    }
-    for name in class_names:
-        vals = [h["per_class_iou"].get(name) for h in tail]
-        vals = [v for v in vals if v is not None and not (isinstance(v, float) and np.isnan(v))]
-        out["per_class"][name] = {
-            "mean": float(np.mean(vals)) if vals else None,
-            "std": float(np.std(vals)) if vals else None,
-            "min": float(np.min(vals)) if vals else None,
-            "max": float(np.max(vals)) if vals else None,
-            "n": len(vals),
-        }
-    return out
+# ``stability_stats`` now lives in ``riceseg_pretrain`` (single source of truth,
+# re-imported above) so the pretraining run and this control report stability
+# identically. It stays importable from this module for backward compatibility.
 
 
 # ================================================================ main

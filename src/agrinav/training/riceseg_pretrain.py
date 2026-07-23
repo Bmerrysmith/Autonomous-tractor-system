@@ -388,13 +388,37 @@ class RiceSegDataset(Dataset):
 
 
 # ================================================================ loss / metrics
-class SegLoss(nn.Module):
-    """class-weighted CE + soft Dice."""
+LOSSES = ("ce_dice", "focal_tversky")
 
-    def __init__(self, class_weights=None, dice_w=0.5):
+
+class SegLoss(nn.Module):
+    """class-weighted CE + soft Dice.
+
+    ``dice_weighted`` and ``ignore_background`` are OFF by default so this loss
+    is numerically identical to the original recipe. The baseline control
+    (``baseline_seg_control.py``) imports this class and calls ``SegLoss(weights)``
+    with defaults, so the A/B stays comparable — the knobs only change a
+    pretraining run that opts in. Weighting the Dice term (or dropping the huge,
+    easy background channel from it) gives the region loss the same minority
+    emphasis the weighted CE already has, instead of letting background — whose
+    Dice is ~1 and gradient ~0 — dilute the per-class mean.
+    """
+
+    def __init__(
+        self,
+        class_weights=None,
+        dice_w=0.5,
+        dice_weighted=False,
+        ignore_background=False,
+    ):
         super().__init__()
         self.ce = nn.CrossEntropyLoss(weight=class_weights)
         self.dice_w = dice_w
+        self.ignore_background = ignore_background
+        if dice_weighted and class_weights is not None:
+            self.register_buffer("dice_weights", class_weights / class_weights.sum())
+        else:
+            self.dice_weights = None
 
     def forward(self, logits, target):
         ce = self.ce(logits, target)
@@ -402,8 +426,80 @@ class SegLoss(nn.Module):
         oh = F.one_hot(target, logits.shape[1]).permute(0, 3, 1, 2).float()
         inter = (prob * oh).sum((0, 2, 3))
         card = prob.sum((0, 2, 3)) + oh.sum((0, 2, 3))
-        dice = 1.0 - ((2 * inter + 1.0) / (card + 1.0)).mean()
+        per_class = 1.0 - (2 * inter + 1.0) / (card + 1.0)  # [C], 0 = perfect
+        start = 1 if self.ignore_background else 0
+        pc = per_class[start:]
+        if self.dice_weights is not None:
+            w = self.dice_weights[start:]
+            dice = (pc * w).sum() / w.sum().clamp_min(1e-12)
+        else:
+            dice = pc.mean()
         return ce + self.dice_w * dice
+
+
+class FocalTverskyLoss(nn.Module):
+    """Focal-Tversky loss for minority-class recall (weeds / duckweed).
+
+    ``alpha`` weights false positives, ``beta`` false negatives; ``beta > alpha``
+    pushes recall on the rare classes that median-frequency CE alone struggles
+    with, and ``gamma > 1`` focuses gradient on the hard classes. Background is
+    excluded by default so it cannot dominate the class mean. A CE term is kept
+    for optimisation stability.
+    """
+
+    def __init__(
+        self,
+        class_weights=None,
+        alpha=0.3,
+        beta=0.7,
+        gamma=1.3333,
+        ignore_background=True,
+        smooth=1.0,
+    ):
+        super().__init__()
+        self.ce = nn.CrossEntropyLoss(weight=class_weights)
+        self.alpha, self.beta, self.gamma = alpha, beta, gamma
+        self.ignore_background = ignore_background
+        self.smooth = smooth
+
+    def forward(self, logits, target):
+        prob = logits.softmax(1)
+        oh = F.one_hot(target, logits.shape[1]).permute(0, 3, 1, 2).float()
+        tp = (prob * oh).sum((0, 2, 3))
+        fp = (prob * (1 - oh)).sum((0, 2, 3))
+        fn = ((1 - prob) * oh).sum((0, 2, 3))
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        ft = (1.0 - tversky) ** self.gamma
+        start = 1 if self.ignore_background else 0
+        return self.ce(logits, target) + ft[start:].mean()
+
+
+def build_loss(
+    name,
+    class_weights=None,
+    *,
+    dice_w=0.5,
+    dice_weighted=False,
+    ignore_background=False,
+    tversky=(0.3, 0.7, 1.3333),
+):
+    """Construct the segmentation loss selected on the CLI.
+
+    ``ce_dice`` with defaults reproduces the original recipe (and is what the
+    baseline control uses); ``focal_tversky`` is the opt-in minority-recall
+    variant. Fails closed on an unknown name rather than silently defaulting.
+    """
+    if name == "ce_dice":
+        return SegLoss(
+            class_weights,
+            dice_w=dice_w,
+            dice_weighted=dice_weighted,
+            ignore_background=ignore_background,
+        )
+    if name == "focal_tversky":
+        a, b, g = tversky
+        return FocalTverskyLoss(class_weights, alpha=a, beta=b, gamma=g, ignore_background=True)
+    raise SystemExit(f"unknown --loss {name!r}; choose from {LOSSES}")
 
 
 class ConfMat:
@@ -426,6 +522,143 @@ class ConfMat:
         absent = [CLASS_NAMES[i] for i in range(self.n) if np.isnan(iou[i])]
         miou = float(np.nanmean(iou)) if np.any(~np.isnan(iou)) else float("nan")
         return iou, miou, absent
+
+
+# ================================================================ selection / schedule
+def stability_stats(history, window=5, class_names=CLASS_NAMES):
+    """Mean/std of mIoU and per-class IoU over the final ``window`` epochs.
+
+    Pure (no torch, no IO) so it is unit-testable, and the single source of
+    truth: ``baseline_seg_control`` re-imports this rather than redefining it, so
+    the pretraining run and the control report stability the same way. Classes
+    absent from an epoch are recorded as ``None`` by the training loop and are
+    skipped here rather than counted as zero (which would fabricate a low score
+    for a class that simply did not appear in that epoch's validation pass).
+    """
+    if not history:
+        return {}
+    tail = history[-max(1, int(window)) :]
+    mious = [h["miou"] for h in tail if h.get("miou") is not None and not np.isnan(h["miou"])]
+    out = {
+        "window": len(tail),
+        "epochs": [h["epoch"] for h in tail],
+        "miou_mean": float(np.mean(mious)) if mious else None,
+        "miou_std": float(np.std(mious)) if mious else None,
+        "per_class": {},
+    }
+    for name in class_names:
+        vals = [h["per_class_iou"].get(name) for h in tail]
+        vals = [v for v in vals if v is not None and not (isinstance(v, float) and np.isnan(v))]
+        out["per_class"][name] = {
+            "mean": float(np.mean(vals)) if vals else None,
+            "std": float(np.std(vals)) if vals else None,
+            "min": float(np.min(vals)) if vals else None,
+            "max": float(np.max(vals)) if vals else None,
+            "n": len(vals),
+        }
+    return out
+
+
+def selection_score(per_class_iou, select_classes):
+    """Mean IoU over the target classes present this epoch, or ``None`` if none
+    of them appeared. ``per_class_iou`` maps class name -> float|None exactly as
+    the training history stores it. This is the signal used to export the
+    backbone by the safety-critical minority classes instead of a
+    background-dominated overall mIoU.
+    """
+    vals = [per_class_iou.get(c) for c in select_classes]
+    vals = [v for v in vals if v is not None and not (isinstance(v, float) and np.isnan(v))]
+    if not vals:
+        return None
+    return float(np.mean(vals))
+
+
+def best_by_selection(
+    history,
+    metric="minority",
+    select_classes=("weeds", "duckweed", "senescent"),
+    ema_beta=0.6,
+):
+    """Pure, causal choice of the epoch whose weights should be exported.
+
+    ``metric='miou'``     — original behaviour: argmax of the single-epoch
+                            present-class mIoU. Kept so ``--select-metric miou``
+                            reproduces prior runs (and drives the overfit gate).
+    ``metric='minority'`` — EMA-smoothed mean IoU over ``select_classes``. This
+                            resists the single-epoch weed swings (0.11–0.34 while
+                            loss fell smoothly) that made the old argmax export a
+                            noisy peak. Epochs where no target class is present
+                            are skipped and the EMA is carried forward.
+
+    Causal (uses only epochs up to each point), so replaying it over the growing
+    history in the training loop selects exactly the epoch this returns over the
+    full history. Returns ``{'best_epoch','best_score','metric','eligible_epochs'}``
+    or ``None`` when no epoch is scorable (caller falls back to mIoU).
+    """
+    if not history:
+        return None
+    if metric == "miou":
+        best = None
+        for h in history:
+            m = h.get("miou")
+            if m is None or (isinstance(m, float) and np.isnan(m)):
+                continue
+            if best is None or m > best["best_score"]:
+                best = {"best_epoch": h["epoch"], "best_score": float(m)}
+        return {**best, "metric": "miou", "eligible_epochs": len(history)} if best else None
+    ema, best, eligible = None, None, 0
+    for h in history:
+        raw = selection_score(h.get("per_class_iou", {}), select_classes)
+        if raw is None:
+            continue
+        eligible += 1
+        ema = raw if ema is None else ema_beta * ema + (1 - ema_beta) * raw
+        if best is None or ema > best["best_score"]:
+            best = {"best_epoch": h["epoch"], "best_score": float(ema)}
+    return {**best, "metric": "minority", "eligible_epochs": eligible} if best else None
+
+
+def build_param_groups(model, base_lr, backbone_mult=1.0):
+    """Optimiser param groups. With ``backbone_mult == 1.0`` (default) this is a
+    single group at ``base_lr`` — identical to the original AdamW over
+    ``model.parameters()``. A value < 1.0 gives the (pre)trained backbone a
+    smaller step than the freshly-initialised decoder/head (discriminative LR).
+    """
+    if backbone_mult == 1.0:
+        return [{"params": [p for p in model.parameters() if p.requires_grad], "lr": base_lr}]
+    bb, other = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        (bb if name.startswith("backbone.") else other).append(p)
+    groups = []
+    if bb:
+        groups.append({"params": bb, "lr": base_lr * backbone_mult})
+    if other:
+        groups.append({"params": other, "lr": base_lr})
+    return groups
+
+
+def build_scheduler(
+    optimizer, epochs, warmup_epochs, base_lr, eta_min_ratio=0.01, warmup_start=0.01
+):
+    """Cosine anneal to ``base_lr * eta_min_ratio``, optionally preceded by a
+    linear warmup. Stepped once per epoch. With ``warmup_epochs == 0`` (default)
+    this is exactly ``CosineAnnealingLR(T_max=epochs, eta_min=base_lr*0.01)`` —
+    the original schedule. A short warmup lets the reinitialised head settle
+    before the backbone takes full-size steps, damping the early weed-IoU swing.
+    """
+    from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+
+    eta_min = base_lr * eta_min_ratio
+    warmup_epochs = max(0, int(warmup_epochs))
+    if warmup_epochs == 0:
+        return CosineAnnealingLR(optimizer, T_max=epochs, eta_min=eta_min)
+    warmup = LinearLR(
+        optimizer, start_factor=warmup_start, end_factor=1.0, total_iters=warmup_epochs
+    )
+    cosine = CosineAnnealingLR(optimizer, T_max=max(1, epochs - warmup_epochs), eta_min=eta_min)
+    return SequentialLR(optimizer, [warmup, cosine], milestones=[warmup_epochs])
 
 
 # ================================================================ overfit gate
@@ -517,6 +750,50 @@ def main():
         "--no-imagenet", action="store_true", help="skip ImageNet warm-start of the compatible 92%"
     )
     ap.add_argument("--include-fpn", action="store_true")
+    # --- item 1: recipe / loader parity (no more hard-coded num_workers) ---
+    ap.add_argument("--num-workers", type=int, default=2)
+    # --- item 2: robust checkpoint selection ---
+    ap.add_argument(
+        "--select-metric",
+        choices=("minority", "miou"),
+        default="minority",
+        help="which epoch to export: 'minority' = EMA-smoothed mean IoU over "
+        "--select-classes (resists single-epoch weed swings); 'miou' = old "
+        "single-epoch present-class mIoU (reproduces prior runs). Overfit runs "
+        "always use 'miou' so the gate is unchanged.",
+    )
+    ap.add_argument(
+        "--select-classes",
+        default="weeds,duckweed,senescent",
+        help="comma-separated target classes for --select-metric minority",
+    )
+    ap.add_argument(
+        "--select-ema", type=float, default=0.6, help="EMA beta for the minority selection score"
+    )
+    # --- item 3: loss / LR levers for the hard classes (default = old recipe) ---
+    ap.add_argument("--loss", choices=LOSSES, default="ce_dice")
+    ap.add_argument(
+        "--dice-weighted",
+        action="store_true",
+        help="weight the Dice term by the class weights (ce_dice only)",
+    )
+    ap.add_argument(
+        "--dice-ignore-bg",
+        action="store_true",
+        help="exclude background from the Dice term (ce_dice only)",
+    )
+    ap.add_argument("--tversky-alpha", type=float, default=0.3, help="FP weight (focal_tversky)")
+    ap.add_argument("--tversky-beta", type=float, default=0.7, help="FN weight (focal_tversky)")
+    ap.add_argument("--tversky-gamma", type=float, default=1.3333, help="focusing (focal_tversky)")
+    ap.add_argument(
+        "--warmup-epochs", type=int, default=0, help="linear LR warmup before cosine (0 = off)"
+    )
+    ap.add_argument(
+        "--backbone-lr-mult",
+        type=float,
+        default=1.0,
+        help="LR multiplier for backbone params vs head (1.0 = single group)",
+    )
     ap.add_argument(
         "--overfit",
         type=int,
@@ -558,6 +835,15 @@ def main():
             f"available countries: {countries}"
         )
 
+    select_classes = [c.strip() for c in args.select_classes.split(",") if c.strip()]
+    unknown = [c for c in select_classes if c not in CLASS_NAMES]
+    if unknown:
+        raise SystemExit(
+            f"--select-classes has unknown class(es) {unknown}; choose from {CLASS_NAMES}"
+        )
+    # The overfit gate is a mIoU sanity check; keep its selection unchanged.
+    select_metric = "miou" if args.overfit else args.select_metric
+
     if args.overfit:
         # Stratified so all six classes appear (else duckweed NaN inflates mIoU),
         # and exported to an isolated temp path that can never clobber args.out.
@@ -578,20 +864,28 @@ def main():
             f"(group-aware by source photo; 0 source overlap)"
         )
 
+    # Create the export dir up front so a run cannot train for hours and then
+    # die at the first checkpoint write (baseline_seg_control does the same).
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
     weights = compute_class_weights(train_p).to(device)
+    # Loader config mirrors baseline_seg_control so the two runs share it: keep
+    # the worker pool alive across epochs (persistent_workers) instead of
+    # respawning it every boundary, and expose num_workers instead of a
+    # hard-coded 2 (CLAUDE.md 3.3).
+    common = dict(num_workers=args.num_workers)
+    if args.num_workers > 0:
+        common["persistent_workers"] = True
     tl = DataLoader(
         RiceSegDataset(train_p, args.img_size, augment=True),
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=2,
         pin_memory=True,
         drop_last=len(train_p) > args.batch_size,
+        **common,
     )
     vl = DataLoader(
-        RiceSegDataset(val_p, args.img_size),
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=2,
+        RiceSegDataset(val_p, args.img_size), batch_size=args.batch_size, shuffle=False, **common
     )
 
     model = RiceSegModel().to(device)
@@ -620,13 +914,29 @@ def main():
         # NOTE: no BN freezing here — the whole point is retraining ALL BN in-domain.
     else:
         print("[imagenet] skipped (--no-imagenet): true random->RiceSEG condition")
-    crit = SegLoss(weights)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=args.lr * 0.01)
-    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
+    crit = build_loss(
+        args.loss,
+        weights,
+        dice_weighted=args.dice_weighted,
+        ignore_background=args.dice_ignore_bg,
+        tversky=(args.tversky_alpha, args.tversky_beta, args.tversky_gamma),
+    )
+    opt = torch.optim.AdamW(
+        build_param_groups(model, args.lr, args.backbone_lr_mult), lr=args.lr, weight_decay=1e-4
+    )
+    sched = build_scheduler(opt, epochs, args.warmup_epochs, args.lr)
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+    print(
+        f"[loss] {args.loss} (dice_weighted={args.dice_weighted}, "
+        f"ignore_bg={args.dice_ignore_bg}) | [lr] warmup={args.warmup_epochs} "
+        f"backbone_mult={args.backbone_lr_mult} | [select] {select_metric}"
+        + (f" over {select_classes} ema={args.select_ema}" if select_metric == "minority" else "")
+    )
 
     best = -1.0
     best_epoch, best_iou_vec, best_absent = 0, None, []
+    best_sel_score = None
+    exported_any = False
     history = []
     for ep in range(1, epochs + 1):
         model.train()
@@ -634,7 +944,7 @@ def main():
         for x, y in tl:
             x, y = x.to(device), y.to(device)
             opt.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
+            with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
                 loss = crit(model(x), y)
             scaler.scale(loss).backward()
             scaler.step(opt)
@@ -668,8 +978,13 @@ def main():
         if absent:
             # Explicit, not silent: mIoU above is the mean over PRESENT classes.
             line += f'  [absent: {",".join(absent)}]'
-        if miou > best:
+        # Export by the selection metric, not raw single-epoch mIoU. Replaying
+        # the causal selector over the history so far yields the same epoch it
+        # would over the full history, so the running best is exact.
+        sel = best_by_selection(history, select_metric, tuple(select_classes), args.select_ema)
+        if sel and sel["best_epoch"] == ep:
             best, best_epoch, best_iou_vec, best_absent = miou, ep, iou, absent
+            best_sel_score = sel["best_score"]
             export_backbone(model, out_path, include_fpn=args.include_fpn)
             if not args.overfit:
                 save_full_checkpoint(
@@ -682,8 +997,32 @@ def main():
                     vars(args),
                     history,
                 )
-            line += "  * exported"
+            exported_any = True
+            line += f"  * exported ({select_metric}={sel['best_score']:.4f})"
         print(line, flush=True)
+
+    if not exported_any:
+        # The selection metric never scored an epoch (target classes never
+        # appeared in validation). Export the final model so a checkpoint always
+        # exists, and say so loudly rather than silently shipping nothing.
+        print(
+            f"[warn] --select-metric {select_metric} never scored an epoch "
+            f"(classes {select_classes} absent from val); exporting FINAL epoch."
+        )
+        best, best_epoch, best_iou_vec, best_absent = miou, epochs, iou, absent
+        best_sel_score = None
+        export_backbone(model, out_path, include_fpn=args.include_fpn)
+        if not args.overfit:
+            save_full_checkpoint(
+                Path(str(out_path) + ".fullckpt.pth"),
+                model,
+                opt,
+                sched,
+                epochs,
+                best,
+                vars(args),
+                history,
+            )
 
     if args.overfit:
         _enforce_overfit_gate(best, args.overfit_min_miou)
@@ -707,6 +1046,24 @@ def main():
             "holdout_country": args.holdout_country,
         },
         "imagenet_coverage": imagenet_coverage,
+        "selection": {
+            "metric": select_metric,
+            "select_classes": select_classes,
+            "ema_beta": args.select_ema,
+            "best_epoch": best_epoch,
+            "best_score": best_sel_score,
+        },
+        "loss": {
+            "name": args.loss,
+            "dice_weighted": args.dice_weighted,
+            "ignore_background": args.dice_ignore_bg,
+            "tversky": [args.tversky_alpha, args.tversky_beta, args.tversky_gamma],
+        },
+        "lr_schedule": {
+            "warmup_epochs": args.warmup_epochs,
+            "backbone_lr_mult": args.backbone_lr_mult,
+        },
+        "stability": stability_stats(history, 5),
         "best": {
             "epoch": best_epoch,
             "miou_present_classes": best,

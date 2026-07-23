@@ -38,6 +38,30 @@ from agrinav.training.riceseg_pretrain import (
     sha256_file,
 )
 
+
+def _seg_history(weeds, mious=None):
+    """History rows shaped like the training loop emits (weeds IoU varied, other
+    classes fixed) for exercising the checkpoint-selection logic."""
+    out = []
+    for i, w in enumerate(weeds):
+        out.append(
+            {
+                "epoch": i + 1,
+                "miou": 0.5 if mious is None else mious[i],
+                "per_class_iou": {
+                    "background": 0.9,
+                    "green_veg": 0.85,
+                    "senescent": 0.35,
+                    "panicle": 0.7,
+                    "weeds": w,
+                    "duckweed": 0.35,
+                },
+                "absent_classes": [],
+            }
+        )
+    return out
+
+
 # The supplied RiceSEG archive extracts to a single wrapper directory that then
 # contains one directory per country; some countries add a site level.
 WRAPPER = "global rice segmentation"
@@ -239,6 +263,140 @@ class HashHelperTests(unittest.TestCase):
             self.assertEqual(sha256_file(a), sha256_file(b))
             b.write_bytes(b"agrinav2")
             self.assertNotEqual(sha256_file(a), sha256_file(b))
+
+
+class SelectionScoreTests(unittest.TestCase):
+    def test_mean_over_present_target_classes(self):
+        pc = {"weeds": 0.4, "duckweed": 0.2, "senescent": 0.6, "background": 0.9}
+        self.assertAlmostEqual(
+            rp.selection_score(pc, ["weeds", "duckweed", "senescent"]), 0.4, places=6
+        )
+
+    def test_none_when_no_target_present(self):
+        pc = {"background": 0.9, "green_veg": 0.8, "weeds": None, "duckweed": None}
+        self.assertIsNone(rp.selection_score(pc, ["weeds", "duckweed"]))
+
+    def test_absent_target_is_skipped_not_zeroed(self):
+        # duckweed absent must not drag the score to 0.25; it is simply skipped.
+        pc = {"weeds": 0.5, "duckweed": None}
+        self.assertAlmostEqual(rp.selection_score(pc, ["weeds", "duckweed"]), 0.5, places=6)
+
+
+class BestBySelectionTests(unittest.TestCase):
+    def test_empty_history_returns_none(self):
+        self.assertIsNone(rp.best_by_selection([], "minority"))
+
+    def test_miou_mode_is_single_epoch_argmax(self):
+        h = _seg_history([0.2, 0.5, 0.2], mious=[0.50, 0.61, 0.55])
+        sel = rp.best_by_selection(h, metric="miou")
+        self.assertEqual(sel["best_epoch"], 2)
+        self.assertEqual(sel["metric"], "miou")
+
+    def test_minority_ema_rejects_isolated_spike(self):
+        # weeds spikes at epoch 3 but is sustained high at 5-6; EMA must prefer
+        # the sustained region, not the lone noisy peak.
+        h = _seg_history([0.2, 0.2, 0.5, 0.2, 0.45, 0.5])
+        sel = rp.best_by_selection(h, "minority", select_classes=("weeds",), ema_beta=0.6)
+        self.assertEqual(sel["best_epoch"], 6)
+        self.assertNotEqual(sel["best_epoch"], 3)
+
+    def test_metrics_diverge_on_a_noisy_peak(self):
+        # mIoU peaks at the same epoch the weed value spikes: the old metric
+        # would export that noisy epoch, the new one would not. That divergence
+        # is the entire reason for the fix.
+        h = _seg_history([0.2, 0.2, 0.5, 0.2, 0.45, 0.5], mious=[0.5, 0.5, 0.62, 0.5, 0.55, 0.58])
+        self.assertEqual(rp.best_by_selection(h, "miou")["best_epoch"], 3)
+        self.assertEqual(rp.best_by_selection(h, "minority", ("weeds",), 0.6)["best_epoch"], 6)
+
+    def test_none_when_targets_never_present(self):
+        h = _seg_history([None, None])
+        self.assertIsNone(rp.best_by_selection(h, "minority", ("weeds",)))
+
+
+class LossTests(unittest.TestCase):
+    def _batch(self):
+        torch.manual_seed(0)
+        return torch.randn(2, NUM_CLASSES, 8, 8), torch.randint(0, NUM_CLASSES, (2, 8, 8))
+
+    def test_default_ce_dice_matches_legacy_formula(self):
+        import torch.nn.functional as F
+
+        logits, target = self._batch()
+        ce = torch.nn.CrossEntropyLoss()(logits, target)
+        prob = logits.softmax(1)
+        oh = F.one_hot(target, NUM_CLASSES).permute(0, 3, 1, 2).float()
+        inter = (prob * oh).sum((0, 2, 3))
+        card = prob.sum((0, 2, 3)) + oh.sum((0, 2, 3))
+        legacy = ce + 0.5 * (1.0 - ((2 * inter + 1.0) / (card + 1.0)).mean())
+        self.assertAlmostEqual(float(rp.SegLoss()(logits, target)), float(legacy), places=5)
+
+    def test_weighted_dice_changes_the_value(self):
+        logits, target = self._batch()
+        w = torch.tensor([0.5, 0.5, 1.0, 1.0, 8.0, 8.0])
+        plain = float(rp.SegLoss(w)(logits, target))
+        weighted = float(rp.SegLoss(w, dice_weighted=True)(logits, target))
+        self.assertNotAlmostEqual(plain, weighted, places=4)
+
+    def test_ignore_background_changes_the_value(self):
+        logits, target = self._batch()
+        full = float(rp.SegLoss()(logits, target))
+        nobg = float(rp.SegLoss(ignore_background=True)(logits, target))
+        self.assertNotAlmostEqual(full, nobg, places=5)
+
+    def test_focal_tversky_is_a_finite_scalar(self):
+        logits, target = self._batch()
+        loss = rp.build_loss("focal_tversky")(logits, target)
+        self.assertEqual(loss.dim(), 0)
+        self.assertTrue(bool(torch.isfinite(loss)))
+
+    def test_unknown_loss_name_fails_closed(self):
+        with self.assertRaises(SystemExit):
+            rp.build_loss("dice_only")
+
+
+class ParamGroupTests(unittest.TestCase):
+    def test_single_group_when_mult_is_one(self):
+        groups = rp.build_param_groups(RiceSegModel(), 3e-4, 1.0)
+        self.assertEqual(len(groups), 1)
+        self.assertAlmostEqual(groups[0]["lr"], 3e-4)
+
+    def test_discriminative_lr_splits_backbone_and_head(self):
+        model = RiceSegModel()
+        groups = rp.build_param_groups(model, 3e-4, 0.1)
+        self.assertEqual(len(groups), 2)
+        lrs = sorted(g["lr"] for g in groups)
+        self.assertAlmostEqual(lrs[0], 3e-5)  # backbone (0.1x)
+        self.assertAlmostEqual(lrs[1], 3e-4)  # head
+        counted = sum(sum(p.numel() for p in g["params"]) for g in groups)
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        self.assertEqual(counted, trainable)
+
+
+class SchedulerTests(unittest.TestCase):
+    def _opt(self, base_lr=1e-3):
+        return torch.optim.AdamW(rp.build_param_groups(RiceSegModel(), base_lr, 1.0), lr=base_lr)
+
+    def test_no_warmup_starts_at_base_lr(self):
+        opt = self._opt()
+        rp.build_scheduler(opt, epochs=10, warmup_epochs=0, base_lr=1e-3)
+        self.assertAlmostEqual(opt.param_groups[0]["lr"], 1e-3, places=7)
+
+    def test_warmup_starts_low_then_reaches_base(self):
+        opt = self._opt()
+        sched = rp.build_scheduler(opt, epochs=10, warmup_epochs=3, base_lr=1e-3, warmup_start=0.01)
+        self.assertLess(opt.param_groups[0]["lr"], 1e-3)  # warm start
+        for _ in range(3):
+            opt.step()  # match real order (optimizer before scheduler)
+            sched.step()
+        self.assertAlmostEqual(opt.param_groups[0]["lr"], 1e-3, places=5)  # base after warmup
+
+    def test_cosine_reaches_eta_min_floor(self):
+        opt = self._opt()
+        sched = rp.build_scheduler(opt, epochs=5, warmup_epochs=0, base_lr=1e-3, eta_min_ratio=0.01)
+        for _ in range(5):
+            opt.step()  # match real order (optimizer before scheduler)
+            sched.step()
+        self.assertLessEqual(opt.param_groups[0]["lr"], 1e-3 * 0.01 + 1e-9)
 
 
 if __name__ == "__main__":

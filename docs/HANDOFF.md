@@ -27,6 +27,27 @@ unified CLI. Not yet pushed. The next real engineering gate is **Gate 4**
 **Active branch:** `chore/gate1-packaging-ci` (4 commits) off
 `codex/repository-recovery`. **Unpushed.**
 
+## 2026-07-23 — RiceSEG seg training fixes (items 1–3)
+
+Branch `feat/riceseg-training-optimization` off `chore/gate1-packaging-ci`.
+Diagnosed the pretrain-vs-baseline seg A/B, then landed:
+
+1. **Recipe parity** in `riceseg_pretrain.py` — new-API AMP, `--num-workers` +
+   persistent workers (matches `baseline_seg_control`); noted the unresolved
+   **batch-size confound** (12 vs 8) in the recorded runs.
+2. **Robust checkpoint selection** — export by EMA-smoothed minority-class IoU
+   (`--select-metric minority`, new default) instead of background-dominated
+   single-epoch mIoU; `miou` kept for repro; overfit gate unchanged. `stability`
+   moved to `riceseg_pretrain` (single source; baseline re-imports).
+3. **Loss/LR levers (opt-in)** — `--loss focal_tversky`, `--dice-weighted`,
+   `--dice-ignore-bg`, `--warmup-epochs`, `--backbone-lr-mult`.
+
+Verified: `pytest` 128 passed + 16 subtests; ruff/black clean; CPU smoke run of
+both loss paths + both selection metrics on synthetic tiles (see
+`docs/research/RICESEG_PRETRAIN_RESULTS.md`). **Not** run on real RiceSEG yet.
+Left untouched: an unrelated uncommitted `weeddet_v6b.py` edit + untracked
+`tests/test_weeddet_train.py` (someone's in-progress Gate-4 detector work).
+
 ## Done this session (Gate 1)
 
 - `src/agrinav/` package layout; all modules moved with history preserved
