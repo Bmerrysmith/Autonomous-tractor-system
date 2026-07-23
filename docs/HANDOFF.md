@@ -17,15 +17,45 @@ It is intentionally short: a *pointer*, not a log. Detailed history lives in git
 
 ---
 
-## Current status — 2026-07-22
+## Current status — 2026-07-23
 
-**Gate 1 (reproducible, installable project) is complete and verified.** The
-project is now an installable `agrinav` package with packaging, fast CI, and a
-unified CLI. Not yet pushed. The next real engineering gate is **Gate 4**
-(detector correctness in `weeddet_v6b.py`) per `START_HERE.md` and the roadmap.
+**Phase-2 detector training pipeline (exploratory) is built, smoke-validated, and
+independently reviewed and committed.** The `weeddet_v6b` detector can now be
+trained on the grouped, leakage-free RiceSEG split from a CLI (`agrinav
+train-detector`) or the new Colab notebook. The first GPU run is **exploratory**
+(loss convergence + qualitative val predictions); a defensible mAP still needs the
+**deferred Gate-4 remainder** (COCO evaluator + canonical postprocess P1-6 + perf
+P1-4/P1-5). Test split is **sealed** everywhere; selection is on val.
 
-**Active branch:** `chore/gate1-packaging-ci` (4 commits) off
-`codex/repository-recovery`. **Unpushed.**
+Gate 1 (installable package) is committed on `chore/gate1-packaging-ci`, **still
+unpushed**. The Phase-2 pipeline is committed on **`feat/phase2-detector-pipeline`**
+(branched off Gate-1), also unpushed.
+
+**Active branch:** `feat/phase2-detector-pipeline` off `chore/gate1-packaging-ci`.
+
+## Done this session (2026-07-23 — Phase-2 detector pipeline)
+
+- New CLI `agrinav train-detector` (`src/agrinav/training/weeddet_train.py`):
+  `_CocoSplitDataset` (COCO split + `images_root + file_name` layout; contiguous
+  class remap of the non-contiguous cat ids `{1,2,4}`), plus `--self-test`,
+  `--overfit N`, and full modes. It **injects** its dataset into the byte-stable
+  `train_with_progress` rather than reimplementing the loop.
+- **One additive line** in `weeddet_v6b.py` `train_with_progress` (optional
+  `config['train_dataset']`; absent key → identical old behavior). The
+  byte-stability freeze is intentionally released for **exactly this line** now
+  that Phase-2 / Gate-4 work has begun.
+- `configs/training/detector_{smoke,default,gpu}.yaml`;
+  `notebooks/weeddet_detector_colab.ipynb` (Drive mount, RiceSEG extract, GPU
+  train, run manifest, qualitative-val cell — **test json never loaded**);
+  `tests/test_weeddet_train.py` (5 tests).
+- **Verified (this tree):** `--self-test` PASS (finite grads); **overfit-8 on real
+  RiceSEG PASS — avg_loss 7.90 → 5.81, monotone** (wiring gate, not a quality
+  benchmark); `pytest tests/test_weeddet_train.py` 5 passed; full suite 128 passed
+  (builder); ruff/black/mypy clean. Independent review of the 7 pipeline files —
+  sealed-test leak, class map, monolith back-compat, pickle round-trip, config
+  precedence — **no findings**.
+- Data re-validated: split counts match `detector_split_v1.json`, **0 group
+  leakage**, human-GT provenance (`riceseg_human_semantic_mask`).
 
 ## Done this session (Gate 1)
 
@@ -57,6 +87,16 @@ ruff check . && black --check .
 
 ## Open items (needs owner / decision)
 
+- [ ] **Run the Colab GPU notebook** `notebooks/weeddet_detector_colab.ipynb` for
+      the first real detector convergence + qualitative-val pass. Needs
+      `RiceSEG.zip` in `MyDrive/agrinav_data/` and the `detector_v1/split_v1` json
+      (run `detector_data_prep_colab.ipynb` first if absent).
+- [ ] **Push `feat/phase2-detector-pipeline` + open PR** (off
+      `chore/gate1-packaging-ci`). Phase-2 files are committed there; keep the PR
+      scoped to the detector pipeline (separate from the parallel seg branch).
+- [ ] **For a defensible mAP (deferred Gate-4 remainder):** COCO AP evaluator +
+      one canonical decode/postprocess (P1-6) + perf P1-4 (anchor count) /
+      P1-5 (`batched_nms`). The current pipeline is exploratory until these land.
 - [ ] **Push + open PR:** `git push -u origin chore/gate1-packaging-ci`.
 - [ ] **Run `/code-review ultra`** on the branch (user-triggered; Claude cannot
       launch it).
@@ -84,3 +124,7 @@ ruff check . && black --check .
 
 - Python 3.12 local; `.venv/` (gitignored) holds a verification env with CPU
   torch installed. CI installs CPU torch from the PyTorch CPU wheel index.
+- Local RiceSEG images are extracted at
+  `~/agrinav_data/incoming/extracted/riceseg/` (the dir that **contains** `global
+  rice segmentation/`) — that path is the `--images-root` for the local detector
+  smoke; the split json is `artifacts/detector_v1/split_v1/train.coco.json`.

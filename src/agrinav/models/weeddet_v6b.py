@@ -1444,7 +1444,8 @@ def train_with_progress(config):
                     verbose=True)
 
     img_size   = config.get('img_size', 512)
-    train_ds   = WeedDataset(config['data_root'], 'train', img_size, augment=True)
+    train_ds = (config['train_dataset'] if config.get('train_dataset') is not None
+                else WeedDataset(config['data_root'], 'train', img_size, augment=True))
     train_loader = DataLoader(
         train_ds, batch_size=config.get('batch_size', 2),
         shuffle=True, collate_fn=collate_fn,
