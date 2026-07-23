@@ -27,11 +27,40 @@ train-detector`) or the new Colab notebook. The first GPU run is **exploratory**
 **deferred Gate-4 remainder** (COCO evaluator + canonical postprocess P1-6 + perf
 P1-4/P1-5). Test split is **sealed** everywhere; selection is on val.
 
+**The RiceSEG overfit gate PASSED for the first time (2026-07-23, Colab GPU):
+best mIoU 0.8631 >= 0.8000.** Full `ImageNet->RiceSEG` pretraining (30 ep / 512px
+/ batch 12) is now **unblocked**. The gate had been failing on a pipeline that was
+never broken — two defects in the *gate* were fixed (class-coverage truncation +
+epoch-floored instead of step-floored budget). Threshold 0.80 is **validated, not
+lowered**. Details and evidence: `docs/research/RICESEG_PRETRAIN_RESULTS.md`.
+
 **Merged to `master` 2026-07-23:** `chore/gate1-packaging-ci`,
-`feat/riceseg-training-optimization`, and `feat/phase2-detector-pipeline` are all
-merged into `master` and pushed. The 3 stale pre-recovery local `master` commits
-(V7 era) were preserved on `archive/pre-recovery-master` before master was reset
-to the recovered origin lineage.
+`feat/riceseg-training-optimization`, `feat/phase2-detector-pipeline`,
+`fix/checkpoint-portability`, `chore/black-security-bump`, the two Colab-branch
+chores, and `fix/overfit-gate` are all merged into `master` and pushed. The 3
+stale pre-recovery local `master` commits (V7 era) were preserved on
+`archive/pre-recovery-master` before master was reset to the recovered origin
+lineage.
+
+## 2026-07-23 — Overfit-gate fix (`fix/overfit-gate`, master `8946981`)
+
+1. **`_stratified_overfit_subset` dropped the class it scanned for.** It appended
+   the duckweed tile, then returned `chosen[:n]` and truncated it off (the only
+   in-range duckweed tile is at scan index 360). duckweed was absent from the GT,
+   so its IoU was `nan` or `0.00` per epoch and `np.nanmean` divided by **5 or 6
+   depending on the epoch** — the failing run's epoch 43 (0.6223) and epoch 45
+   (0.5010) have *identical per-class IoUs*. Now greedy set-cover, selected first
+   and never truncated; uncoverable classes warn instead of skewing the mean.
+2. **The gate floored epochs (60), not steps** — 8 tiles at batch 4 with
+   `drop_last` is 120 AdamW steps. `_overfit_epochs` floors the step budget
+   (1000); the cosine still spans exactly `epochs`. Evidence this mattered: the
+   passing run was at **0.6405 at epoch 60** (where the old cap stopped) and did
+   not cross 0.80 until ~epoch 160.
+
+Also landed this session: `weights_only` checkpoint-load portability for torch
+>= 2.6 (`fix/checkpoint-portability`, was going to break the Colab qualitative-val
+cell), `black` 24.10.0 -> 26.3.1 for the Dependabot cache-path advisory, and both
+Colab notebooks repointed from stale branches to `master` + the src layout.
 
 ## 2026-07-23 — RiceSEG seg training fixes (items 1–3)
 
@@ -110,12 +139,29 @@ Full deployable run (30 ep / 512px / batch 8 / ImageNet on) still pending on a G
 ```bash
 pip install -e ".[dev]"                                   # or use existing .venv/
 python -m agrinav.training.riceseg_pretrain --self-test   # no data needed
-pytest                                                    # 130 passed + 16 subtests
+pytest                                                    # 136 passed + 16 subtests
 ruff check . && black --check .
 ```
 
 ## Open items (needs owner / decision)
 
+- [ ] **Run full `ImageNet->RiceSEG` pretraining** (30 ep / 512px / batch 12 /
+      seed 42) — **unblocked**, the overfit gate passed 0.8631. Cell 7 of
+      `notebooks/riceseg_pretrain_colab.ipynb`. Expect val mIoU **far below**
+      0.86: the gate memorises 8 tiles, the real run uses a group-aware split.
+      Record the manifest in `docs/research/RICESEG_PRETRAIN_RESULTS.md`.
+- [ ] **Phase-2b data decision — `rice-weed-seg` (2,579 imgs).** The two fresh
+      Roboflow exports (`.coco` and `.coco-segmentation`) are **byte-equivalent
+      in content** (same images, same per-image ann counts, polygon areas within
+      0.02%) — use the `.coco` one, the other is a 936 MB duplicate. **Do not
+      train on Roboflow's split:** filenames are video sequences and all 4
+      families span train/valid/test (13/502 valid and 11/256 test images have
+      the literally adjacent frame in train). A curated, grouped, class-remapped
+      version already exists locally at
+      `Downloads/agrinav_intake_2026-07-21/deliverable/detection/RICE/`
+      (`grouped_split.json`, 40-frame blocks, `rice_protect`/`weed_target`,
+      `filter_decisions.csv`) — prefer it. Note it is **2-class**, vs the
+      3-class RiceSEG head; merging needs a documented class-map decision.
 - [ ] **Run the Colab GPU notebook** `notebooks/weeddet_detector_colab.ipynb` for
       the first real detector convergence + qualitative-val pass. Needs
       `RiceSEG.zip` in `MyDrive/agrinav_data/` and the `detector_v1/split_v1` json

@@ -267,3 +267,71 @@ Smoke-tested on synthetic CPU tiles (both loss paths + both selection metrics ru
 end-to-end; manifest + resumable checkpoint written). No full RiceSEG re-run yet.
 
 ---
+
+## Overfit gate — first validated PASS (2026-07-23, Colab GPU)
+
+**`OVERFIT PASSED: best mIoU 0.8631 >= 0.8000`** (epoch 452/500, 512px, ImageNet
+warm-start, 8 stratified tiles). This is the first time the gate has passed, and
+it did so **only after two defects in the gate itself were fixed** — the model,
+preprocessing and loss path were never broken.
+
+### What the gate was measuring before
+
+An earlier GPU run on the same code+data reported `OVERFIT FAILED: best mIoU
+0.6223 < 0.8000` and the message "the preprocessing/model/loss path is broken".
+Both halves of that verdict were wrong:
+
+1. **The subset dropped the class it was scanning for.**
+   `_stratified_overfit_subset` searched for tiles covering all six classes,
+   appended the duckweed tile, then returned `chosen[:n]` and truncated it back
+   off. On the real archive the only in-range duckweed tile sits at scan index
+   360, so duckweed was **absent from the GT every time**. Its IoU was therefore
+   `nan` when the model predicted no duckweed and `0.00` when it predicted a few
+   stray pixels, and `np.nanmean` divided by **5 or 6 depending on the epoch**.
+   In that failing run, epoch 43 (`0.6223`) and epoch 45 (`0.5010`) have
+   *identical per-class IoUs* and differ only in the denominator.
+2. **The gate floored epochs (60), not steps.** 8 tiles at batch 4 with
+   `drop_last` is 2 optimiser steps/epoch = **120 AdamW steps** at lr 3e-4 under
+   a cosine decay — far too few to memorise 8 images.
+
+### Evidence both fixes were load-bearing
+
+From the passing run's own log:
+
+| Epoch | mIoU | Note |
+|---|---|---|
+| 60 | 0.6405 | where the **old** 60-epoch cap stopped — would have failed |
+| ~160 | 0.8033 | first crossing of the 0.80 threshold |
+| 452 | **0.8631** | best; exported |
+
+duckweed ran 0.00 → 0.71 and was **present in all 500 epochs** — no `nan`, no
+denominator flip. Per-class at best: background 0.94, green_veg 0.96,
+senescent 0.88, panicle 0.85, weeds 0.83, duckweed 0.71.
+
+### The 0.80 threshold is validated, not lowered
+
+It sits just under what the architecture actually reaches (0.86) — passable, but
+only by a genuinely working pipeline. **Do not calibrate it down.**
+
+### Caveats
+
+- The gate trains and evaluates on the **same 8 tiles by design**. 0.8631 is a
+  memorisation check, **not** a generalisation result and **not** a baseline.
+  The first meaningful number is val mIoU from a real group-aware split run,
+  which will land far below this.
+- Class rarity in the 8 tiles is extreme — weeds 0.139% of pixels (~365 px/tile
+  at 512), duckweed 0.392%, senescent 0.640%. This is why the run needs ~1000
+  steps and why input resolution matters so much: at 128px those same classes
+  collapse to ~23 and ~64 px/tile and the run plateaus around 0.58. **A reduced
+  -resolution rerun is not a valid proxy for this gate.**
+- The exported `/tmp/riceseg_overfit_*.pth` is an isolated sanity artifact and
+  must not be reused; the production `riceseg_backbone.pth` path is untouched.
+
+Fix landed in `master` (`8946981`); regression tests in
+`tests/test_riceseg_pretrain.py::OverfitSubsetTests` /
+`::OverfitBudgetTests`, including one reproducing the truncation bug directly.
+
+**Next:** the full `ImageNet→RiceSEG` production run (30 ep / 512px / batch 12)
+is now unblocked.
+
+---
