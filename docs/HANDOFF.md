@@ -25,7 +25,7 @@ unified CLI. Not yet pushed. The next real engineering gate is **Gate 4**
 (detector correctness in `weeddet_v6b.py`) per `START_HERE.md` and the roadmap.
 
 **Active branch:** `chore/gate1-packaging-ci` (4 commits) off
-`codex/repository-recovery`. **Unpushed.**
+`codex/repository-recovery`. **Pushed to origin 2026-07-23.**
 
 ## 2026-07-23 — RiceSEG seg training fixes (items 1–3)
 
@@ -42,11 +42,21 @@ Diagnosed the pretrain-vs-baseline seg A/B, then landed:
 3. **Loss/LR levers (opt-in)** — `--loss focal_tversky`, `--dice-weighted`,
    `--dice-ignore-bg`, `--warmup-epochs`, `--backbone-lr-mult`.
 
-Verified: `pytest` 128 passed + 16 subtests; ruff/black clean; CPU smoke run of
-both loss paths + both selection metrics on synthetic tiles (see
-`docs/research/RICESEG_PRETRAIN_RESULTS.md`). **Not** run on real RiceSEG yet.
-Left untouched: an unrelated uncommitted `weeddet_v6b.py` edit + untracked
-`tests/test_weeddet_train.py` (someone's in-progress Gate-4 detector work).
+Verified: `pytest` 128 passed + 16 subtests; ruff/black clean. CPU smoke of both
+loss paths + both selection metrics on synthetic tiles, **and a reduced real run
+on `RiceSEG/Tanzania` (46 train tiles, 3 ep, 128px, focal_tversky + warmup +
+backbone-mult + minority) — ran clean end-to-end in 46s** (real median-freq
+weights, masks validated 0–5; weeds/duckweed absent from that val split so the
+presence-guarded minority selector scored on present targets). Metrics are not a
+baseline by design. See `docs/research/RICESEG_PRETRAIN_RESULTS.md`.
+
+**Pushed to origin 2026-07-23:** `chore/gate1-packaging-ci` and
+`feat/riceseg-training-optimization`. PR opened manually (no `gh`/connector here);
+recommended base `chore/gate1-packaging-ci` ← `feat/riceseg-training-optimization`.
+
+Full deployable run (30 ep / 512px / batch 8 / ImageNet on) still pending on a GPU.
+Note: a concurrent session's `feat/phase2-detector-pipeline` (detector work) also
+rewrote this file on its own branch — HANDOFF will need a merge reconcile.
 
 ## Done this session (Gate 1)
 
