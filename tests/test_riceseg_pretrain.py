@@ -14,6 +14,8 @@ Section 17.1 acceptance gates:
 The tests are deterministic and CPU-only.
 """
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,7 +32,9 @@ from agrinav.training.riceseg_pretrain import (
     RiceSegDataset,
     RiceSegModel,
     _enforce_overfit_gate,
+    _overfit_epochs,
     _overfit_output_path,
+    _stratified_overfit_subset,
     export_backbone,
     load_riceseg_backbone,
     parse_country_site,
@@ -230,6 +234,67 @@ class OverfitGateTests(unittest.TestCase):
     def test_overfit_gate_passes_at_or_above_threshold(self):
         # Must not raise.
         _enforce_overfit_gate(0.85, 0.80)
+
+
+class OverfitSubsetTests(unittest.TestCase):
+    """The subset must keep the rare class it scanned for.
+
+    Mirrors the real failure: on RiceSEG the only in-range duckweed tile sits
+    far past ``n``, and the old ``chosen[:n]`` truncation discarded it, so the
+    gate's mIoU denominator flipped between 5 and 6 classes across epochs.
+    """
+
+    def _pairs(self, tmp, class_sets):
+        from PIL import Image
+
+        pairs = []
+        for i, classes in enumerate(class_sets):
+            path = Path(tmp) / f"label_{i:03d}.png"
+            arr = np.zeros((4, 4), dtype=np.uint8)
+            for j, c in enumerate(sorted(classes)):
+                arr.flat[j] = c
+            Image.fromarray(arr).save(path)
+            pairs.append({"rgb": path, "label": path})
+        return pairs
+
+    def test_rare_class_far_past_n_is_retained(self):
+        # 8 common tiles, then one carrying the rare class -> must survive.
+        common = [{0, 1, 2, 3}] * 8
+        rare = [{0, 5}]
+        with tempfile.TemporaryDirectory() as tmp:
+            pairs = self._pairs(tmp, common + rare)
+            chosen = _stratified_overfit_subset(pairs, 8, num_classes=NUM_CLASSES)
+            covered = set()
+            for p in chosen:
+                covered |= set(np.unique(np.asarray(Image.open(p["label"]))).tolist())
+        self.assertIn(5, covered, "rare class was truncated away (the original bug)")
+
+    def test_pads_up_to_n_when_coverage_is_cheap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pairs = self._pairs(tmp, [set(range(NUM_CLASSES))] + [{0, 1}] * 10)
+            chosen = _stratified_overfit_subset(pairs, 8, num_classes=NUM_CLASSES)
+        self.assertEqual(len(chosen), 8)
+
+    def test_absent_class_is_reported_not_hidden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pairs = self._pairs(tmp, [{0, 1}] * 4)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _stratified_overfit_subset(pairs, 4, num_classes=NUM_CLASSES)
+        self.assertIn("WARNING", buf.getvalue())
+
+
+class OverfitBudgetTests(unittest.TestCase):
+    def test_step_budget_is_floored_not_just_epochs(self):
+        # 8 tiles at batch 4 -> 2 steps/epoch; 60 epochs would be only 120 steps.
+        epochs = _overfit_epochs(8, 4, requested_epochs=30)
+        self.assertGreaterEqual(epochs * (8 // 4), 1000)
+
+    def test_explicit_larger_epoch_request_is_honoured(self):
+        self.assertGreaterEqual(_overfit_epochs(8, 4, requested_epochs=5000), 5000)
+
+    def test_batch_larger_than_subset_does_not_divide_by_zero(self):
+        self.assertGreater(_overfit_epochs(4, 8, requested_epochs=1), 0)
 
 
 class MetricReportingTests(unittest.TestCase):

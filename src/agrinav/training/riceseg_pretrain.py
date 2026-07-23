@@ -687,28 +687,68 @@ def _enforce_overfit_gate(best_miou, threshold):
 
 
 def _stratified_overfit_subset(pairs, n, num_classes=NUM_CLASSES, scan_cap=512):
-    """Pick ~n tiles that together cover all classes so the overfit mIoU is a
-    stable six-class score. The audit noted the first 8 sorted tiles contain no
-    duckweed, so np.nanmean silently drops that class and inflates the gate
-    (Section 9.4). Best-effort within a bounded scan."""
+    """Pick tiles that together cover all classes so the overfit mIoU is a
+    stable ``num_classes``-class score. The audit noted the first 8 sorted tiles
+    contain no duckweed, so ``np.nanmean`` silently drops that class and inflates
+    the gate (Section 9.4).
+
+    Coverage is selected **first** and never truncated away: the previous
+    implementation appended a class-covering tile past ``n`` and then returned
+    ``chosen[:n]``, discarding the very tile it had scanned for (on RiceSEG the
+    only duckweed tile in range sits at scan index 360 and was dropped every
+    time). The subset may therefore exceed ``n`` when covering every class needs
+    more tiles; that is deliberate — a stable denominator matters more than an
+    exact count. Classes absent from the whole scan are reported, not hidden.
+    """
     from PIL import Image
 
-    chosen, seen = [], set()
+    def _classes(pair):
+        return set(np.unique(np.asarray(Image.open(pair["label"]))).tolist())
+
+    # Pass 1 — greedy set cover: keep only tiles that contribute a new class.
+    covering, seen = [], set()
+    wanted = set(range(num_classes))
     for p in pairs[:scan_cap]:
-        if len(chosen) >= n and seen >= set(range(num_classes)):
+        if seen >= wanted:
             break
-        present = set(np.unique(np.asarray(Image.open(p["label"]))).tolist())
-        if (present - seen) or len(chosen) < n:
-            chosen.append(p)
-            seen |= present
-        if len(chosen) >= n and seen >= set(range(num_classes)):
-            break
+        if _classes(p) - seen:
+            covering.append(p)
+            seen |= _classes(p)
+
+    missing = sorted(wanted - seen)
+    if missing:
+        names = [CLASS_NAMES[i] for i in missing]
+        print(
+            f"[gate] WARNING: class(es) {names} absent from the first {scan_cap} tiles; "
+            f"the overfit mIoU is a {len(seen)}-class score and its denominator "
+            "may vary between epochs."
+        )
+
+    # Pass 2 — pad up to n with the cheapest (earliest) tiles not already taken.
+    chosen = list(covering)
+    taken = {id(p) for p in chosen}
     for p in pairs:
         if len(chosen) >= n:
             break
-        if p not in chosen:
+        if id(p) not in taken:
             chosen.append(p)
-    return chosen[: max(n, len(chosen)) if len(chosen) < n else n]
+            taken.add(id(p))
+    return chosen
+
+
+def _overfit_epochs(n_tiles, batch_size, requested_epochs, min_steps=1000, min_epochs=60):
+    """Epoch count giving the overfit gate a real optimisation budget.
+
+    The gate previously floored *epochs* at 60. With 8 tiles at batch 4 and
+    ``drop_last`` that is 2 optimiser steps per epoch — 120 AdamW steps at
+    ``lr 3e-4`` under a cosine decay, far too few to memorise 8 images, so the
+    run plateaued mid-range and the gate failed for want of training rather than
+    for a broken pipeline. Floor the *steps* instead; the schedule still spans
+    exactly ``epochs`` so the cosine is unchanged in shape.
+    """
+    steps_per_epoch = max(1, n_tiles // batch_size if n_tiles > batch_size else 1)
+    needed = -(-min_steps // steps_per_epoch)  # ceil
+    return max(requested_epochs, min_epochs, needed)
 
 
 # ================================================================ gates
@@ -848,12 +888,13 @@ def main():
         # Stratified so all six classes appear (else duckweed NaN inflates mIoU),
         # and exported to an isolated temp path that can never clobber args.out.
         train_p = val_p = _stratified_overfit_subset(pairs, args.overfit)
-        epochs = max(args.epochs, 60)
+        epochs = _overfit_epochs(len(train_p), args.batch_size, args.epochs)
         out_path = _overfit_output_path(args.out)
+        steps = epochs * max(1, len(train_p) // args.batch_size)
         print(
-            f"[gate] OVERFIT-{args.overfit}: must reach mIoU >= "
-            f"{args.overfit_min_miou:.2f}; isolated export -> {out_path} "
-            f"(production path {args.out} untouched)"
+            f"[gate] OVERFIT-{args.overfit}: {len(train_p)} tiles, {epochs} epochs "
+            f"(~{steps} steps); must reach mIoU >= {args.overfit_min_miou:.2f}; "
+            f"isolated export -> {out_path} (production path {args.out} untouched)"
         )
     else:
         train_p, val_p = split_pairs(pairs, args.val_ratio, args.seed, args.holdout_country)
