@@ -183,7 +183,7 @@ class SegmentGeometry(unittest.TestCase):
     def test_box_only_is_not_fabricated_into_a_mask(self):
         drops = {}
         class_index = {n: i for i, n in enumerate(DEFAULT_CLASSES)}
-        (lines, _split) = record_label_lines(
+        lines, _split = record_label_lines(
             _record(
                 "t1",
                 "train",

@@ -53,6 +53,7 @@ Contract check (no model, no network)::
 
     python -m agrinav.data.locateanything_to_proposals --self-test
 """
+
 from __future__ import annotations
 
 import argparse
