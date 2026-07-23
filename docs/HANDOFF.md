@@ -110,7 +110,7 @@ Full deployable run (30 ep / 512px / batch 8 / ImageNet on) still pending on a G
 ```bash
 pip install -e ".[dev]"                                   # or use existing .venv/
 python -m agrinav.training.riceseg_pretrain --self-test   # no data needed
-pytest                                                    # 105 passed + 16 subtests
+pytest                                                    # 130 passed + 16 subtests
 ruff check . && black --check .
 ```
 

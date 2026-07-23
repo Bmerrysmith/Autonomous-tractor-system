@@ -9,17 +9,23 @@ Covers the Phase-2 detector driver seams:
     monolith seam) for a single tiny CPU step and writes a checkpoint.
 """
 
+import argparse
 import json
 import os
+import pickle
 
 import pytest
+import torch
 from PIL import Image
 
 from agrinav.models import weeddet_v6b as wd
 from agrinav.training.weeddet_train import (
     DEFAULT_CLASS_NAMES,
     _CocoSplitDataset,
+    build_config,
+    load_checkpoint_model,
     main,
+    predict_image,
     run_self_test,
 )
 
@@ -112,6 +118,44 @@ def test_self_test_returns_zero_with_finite_losses():
     assert main(["--self-test"]) == 0
 
 
+def test_build_config_round_trips_through_pickle(tmp_path):
+    """The full config (dataset included) must survive pickling -- checkpoints embed it."""
+    ann_file, images_root = _write_synthetic_split(str(tmp_path))
+    args = argparse.Namespace(
+        ann_file=ann_file,
+        images_root=images_root,
+        config=None,
+        no_pretrained_backbone=True,
+    )
+    cfg = build_config(args)
+    assert isinstance(cfg["train_dataset"], _CocoSplitDataset)
+
+    restored = pickle.loads(pickle.dumps(cfg))
+    assert restored["num_classes"] == cfg["num_classes"]
+    assert restored["class_names"] == cfg["class_names"]
+    assert len(restored["train_dataset"]) == len(cfg["train_dataset"])
+
+
+def test_load_checkpoint_model_reads_dataset_bearing_checkpoint(tmp_path):
+    """Checkpoints embed the dataset in config; torch >= 2.6 strict default must not break load."""
+    ann_file, images_root = _write_synthetic_split(str(tmp_path))
+    dataset = _CocoSplitDataset(
+        ann_file, images_root, DEFAULT_CLASS_NAMES, img_size=64, augment=False
+    )
+    model = wd.WeedDet(num_classes=3)
+    ckpt = str(tmp_path / "dataset_bearing.pth")
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "config": {"num_classes": 3, "train_dataset": dataset},
+        },
+        ckpt,
+    )
+
+    loaded = load_checkpoint_model(ckpt, device="cpu")
+    assert not loaded.training  # eval mode
+
+
 @pytest.mark.integration
 def test_injected_dataset_drives_train_with_progress(tmp_path):
     ann_file, images_root = _write_synthetic_split(str(tmp_path))
@@ -140,4 +184,13 @@ def test_injected_dataset_drives_train_with_progress(tmp_path):
 
     model = wd.train_with_progress(config)
     assert model is not None
-    assert os.path.isfile(os.path.join(ckpt_dir, "weeddet_best.pth"))
+    ckpt_path = os.path.join(ckpt_dir, "weeddet_best.pth")
+    assert os.path.isfile(ckpt_path)
+
+    # Full inference seam: reload the real checkpoint via the helper (must
+    # survive the torch >= 2.6 weights_only default) and run one prediction.
+    loaded = load_checkpoint_model(ckpt_path, device="cpu")
+    _, boxes, scores, labels = predict_image(
+        loaded, os.path.join(images_root, "img0.jpg"), img_size=64, score_thr=0.0
+    )
+    assert boxes.shape[0] == scores.shape[0] == labels.shape[0]

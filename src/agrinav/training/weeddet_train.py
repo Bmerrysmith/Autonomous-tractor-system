@@ -451,8 +451,21 @@ def load_checkpoint_model(
     Reads the EMA ``state_dict`` (falls back to the raw model state) and infers
     ``num_classes`` from the saved config when not given. Used by the Colab
     qualitative cell so the notebook redefines no model logic.
+
+    Tries ``weights_only=True`` first, but ``train_with_progress`` embeds the
+    whole training config -- including the injected ``_CocoSplitDataset`` -- in
+    every checkpoint, which the strict unpickler rejects (and torch >= 2.6 makes
+    strict the default). These are trusted self-produced artifacts, so full
+    unpickling is the fallback. Stripping the dataset from the saved config
+    lives in the frozen monolith and is deferred to the Gate-4 rewrite.
     """
-    checkpoint = torch.load(os.fspath(checkpoint_path), map_location=device)
+    import pickle
+
+    path = os.fspath(checkpoint_path)
+    try:
+        checkpoint = torch.load(path, map_location=device, weights_only=True)
+    except (pickle.UnpicklingError, RuntimeError):
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
     if num_classes is None:
         num_classes = int(checkpoint.get("config", {}).get("num_classes", 1))
     model = _WD.WeedDet(num_classes=num_classes)

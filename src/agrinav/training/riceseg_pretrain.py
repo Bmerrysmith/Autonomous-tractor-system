@@ -186,7 +186,7 @@ def load_riceseg_backbone(weeddet_model, ckpt_path, verbose=True, require_fpn=Fa
     load raises instead of silently training from a mostly-random backbone
     (deep audit 2026-07-20, Section 9.4, "partial validation of loaded weights").
     """
-    sd = torch.load(ckpt_path, map_location="cpu")
+    sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     sd = sd.get("state_dict", sd)
     model_sd = weeddet_model.state_dict()
     expected = {k for k in model_sd if k.startswith("backbone.")}
