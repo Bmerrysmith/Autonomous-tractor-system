@@ -1,0 +1,605 @@
+"""weeddet_train.py -- exploratory detector training entrypoint (COCO split -> WeedDet).
+
+This is the Phase-2 detector *driver*. It owns no model, loss, or training-loop
+logic: it adapts the sealed split COCO files onto ``WeedDet`` and calls the
+monolith's :func:`train_with_progress` via a small injected-dataset seam.
+
+Scope (deliberately narrow -- "exploratory first"):
+  * Goal of the first GPU run is loss convergence + qualitative val predictions,
+    NOT a mAP number. There is no COCO evaluator here on purpose.
+  * The **test split is sealed**: this module never opens ``test.coco.json``.
+    Selection happens on train/val only.
+
+Why an adapter dataset instead of reusing ``CocoWeedDataset`` directly: the split
+JSONs are not co-located with their images. Each image record's ``file_name`` is
+archive-relative (e.g. ``global rice segmentation/China/GD/rgb/IMG_5014_..jpg``),
+so the on-disk path is ``os.path.join(images_root, file_name)`` where
+``images_root`` is the extracted ``RiceSEG.zip`` root. ``_CocoSplitDataset``
+overrides only the annotation-file location and path resolution; every other
+behaviour (category-name->index map, letterbox, per-axis box scaling,
+label-aligned augmentation) is inherited from ``CocoWeedDataset``.
+
+CLI:
+    python -m agrinav.training.weeddet_train --self-test
+    python -m agrinav.training.weeddet_train \
+        --ann-file artifacts/detector_v1/split_v1/train.coco.json \
+        --images-root /path/to/RiceSEG --overfit 8 --batch-size 2 --no-pretrained-backbone
+    python -m agrinav.training.weeddet_train \
+        --ann-file .../split_v1/train.coco.json --images-root /content/riceseg \
+        --config configs/training/detector_gpu.yaml \
+        --checkpoint-dir runs/weeddet_baseline
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+import torch
+from torch.utils.data import DataLoader
+
+
+# ---------------------------------------------------------------- import WeedDet
+def _import_wd() -> Any:
+    """Import the WeedDet monolith, tolerating both the installed package and a
+    bare-``models``/direct-script layout (mirrors ``riceseg_pretrain._import_wd``)."""
+    here = Path(__file__).resolve().parent
+    for candidate in (str(here.parent), str(here.parent / "models"), str(here)):
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+    for name in ("agrinav.models.weeddet_v6b", "models.weeddet_v6b", "weeddet_v6b"):
+        try:
+            return __import__(name, fromlist=["x"])
+        except ImportError:
+            continue
+    raise ImportError("weeddet_v6b.py not importable -- put it in models/ or on sys.path")
+
+
+_WD = _import_wd()
+
+# The three detector categories in the split JSONs, in canonical label order.
+# COCO category ids are non-contiguous ({1,2,4}); the parent maps by *name* to
+# contiguous indices in this order, so this tuple defines the class map.
+DEFAULT_CLASS_NAMES: tuple[str, ...] = ("rice_protect", "weed_target", "non_target_aquatic")
+
+# Effective defaults for every ``train_with_progress`` config key this driver
+# owns. A YAML ``--config`` seeds over these; explicit CLI flags override both.
+# ``num_classes`` is intentionally absent -- it is derived from ``class_names``.
+_HARD_DEFAULTS: dict[str, Any] = {
+    "device": None,  # resolved to 'cuda'/'cpu' in build_config
+    "seed": 42,
+    "deterministic": False,
+    "anchor_base_scale": 3,
+    "lsc_k": 7,
+    "use_atss": True,
+    "pretrained_backbone": True,
+    "img_size": 512,
+    "batch_size": 4,
+    "num_workers": 2,
+    "base_lr": 0.001,
+    "momentum": 0.9,
+    "weight_decay": 1e-4,
+    "num_epochs": 12,
+    "save_every": 4,
+    "repeat_factor": 1,
+    "min_lr": 1e-5,
+    "warmup_factor": 0.001,
+    "use_amp": None,  # None -> resolved to cuda-availability
+    "use_ema": True,
+    "ema_decay": 0.999,
+    "grad_clip": 0.5,
+    "checkpoint_dir": "checkpoints/weeddet",
+    "class_names": list(DEFAULT_CLASS_NAMES),
+    "augment": True,
+}
+
+# Keys a YAML config may set. Unknown keys are rejected so typos fail loudly
+# rather than being silently ignored (CLAUDE.md config policy).
+_VALID_CONFIG_KEYS: frozenset[str] = frozenset(_HARD_DEFAULTS) | frozenset({"warmup_iters"})
+
+# argparse attribute -> config key, for the layered CLI-override merge.
+_CLI_TO_CONFIG: dict[str, str] = {
+    "ann_file": "ann_file",
+    "images_root": "images_root",
+    "class_names": "class_names",
+    "img_size": "img_size",
+    "batch_size": "batch_size",
+    "epochs": "num_epochs",
+    "base_lr": "base_lr",
+    "checkpoint_dir": "checkpoint_dir",
+    "num_workers": "num_workers",
+    "save_every": "save_every",
+    "repeat_factor": "repeat_factor",
+    "device": "device",
+    "seed": "seed",
+}
+
+
+# ================================================================ dataset adapter
+class _CocoSplitDataset(_WD.CocoWeedDataset):  # type: ignore[misc, name-defined]
+    """A ``CocoWeedDataset`` whose annotations and images live apart.
+
+    Loads a split COCO JSON from an explicit ``ann_file`` and resolves each image
+    as ``os.path.join(images_root, file_name)``. Achieved by reusing the parent's
+    path convention -- it joins ``(root, split, file_name)`` -- with ``split=''``,
+    so ``__getitem__`` and ``items()`` are inherited unchanged and still exercise
+    the parent letterbox / per-axis scaling / label-aligned augmentation. Only the
+    constructor (ann-file loading + path roots, plus an optional ``limit``) differs.
+    """
+
+    def __init__(
+        self,
+        ann_file: str | os.PathLike[str],
+        images_root: str | os.PathLike[str],
+        class_names: tuple[str, ...],
+        img_size: int = 512,
+        augment: bool = False,
+        limit: int | None = None,
+    ) -> None:
+        from PIL import Image as PILImage
+
+        ann_file = os.fspath(ann_file)
+        images_root = os.fspath(images_root)
+        if not os.path.isfile(ann_file):
+            raise FileNotFoundError(
+                f"annotation file not found: {ann_file!r}. Pass --ann-file pointing at a "
+                "split COCO json, e.g. artifacts/detector_v1/split_v1/train.coco.json "
+                "(never test.coco.json -- that split is sealed)."
+            )
+        if not os.path.isdir(images_root):
+            raise NotADirectoryError(
+                f"images root not found: {images_root!r}. Extract RiceSEG.zip and pass "
+                "--images-root pointing at its root so images_root + file_name resolves "
+                "(e.g. /content/riceseg)."
+            )
+
+        self.PILImage = PILImage
+        # split='' reduces the parent's os.path.join(root, split, file_name) to
+        # os.path.join(images_root, file_name), matching the archive-relative file_name.
+        self.root, self.split = images_root, ""
+        self.img_size, self.augment = img_size, augment
+        self.CLASS_NAMES = list(class_names)
+        self.class_to_idx = {name: idx for idx, name in enumerate(self.CLASS_NAMES)}
+        self.ann_file = ann_file
+
+        with open(ann_file, encoding="utf-8") as handle:
+            coco = json.load(handle)
+
+        name_by_id = {c["id"]: c["name"] for c in coco["categories"]}
+        self.catid_to_idx = {
+            cid: self.class_to_idx[name]
+            for cid, name in name_by_id.items()
+            if name in self.class_to_idx
+        }
+        if not self.catid_to_idx:
+            raise ValueError(
+                f"none of class_names {tuple(class_names)} match categories in "
+                f"{ann_file}: {sorted(name_by_id.values())}"
+            )
+
+        images = coco["images"]
+        self.images = images[:limit] if limit is not None else images
+        kept_ids = {im["id"] for im in self.images}
+        self.anns_by_img: dict[Any, list[dict[str, Any]]] = {}
+        for ann in coco["annotations"]:
+            if ann["category_id"] in self.catid_to_idx and ann["image_id"] in kept_ids:
+                self.anns_by_img.setdefault(ann["image_id"], []).append(ann)
+
+        self.transform = _WD.T.Compose(
+            [
+                _WD.T.ToTensor(),
+                _WD.T.Normalize(mean=_WD.IMAGENET_MEAN, std=_WD.IMAGENET_STD),
+            ]
+        )
+
+    # train_with_progress pickles the whole config (this dataset included) into
+    # every checkpoint. The parent stores the PIL.Image *module* on the instance,
+    # which pickle cannot serialise ("cannot pickle 'module' object"). Drop it on
+    # the way out and re-import it on the way in so the object round-trips and the
+    # checkpoint save never fails.
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state.pop("PILImage", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        from PIL import Image as PILImage
+
+        self.__dict__.update(state)
+        self.PILImage = PILImage
+
+
+# ================================================================ config building
+def parse_class_names(value: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """Normalise a comma string or sequence into a non-empty tuple of class names."""
+    if isinstance(value, str):
+        names = [part.strip() for part in value.split(",") if part.strip()]
+    else:
+        names = [str(part).strip() for part in value if str(part).strip()]
+    if not names:
+        raise ValueError("--class-names resolved to an empty list")
+    return tuple(names)
+
+
+def _resolve_device(name: str | None) -> str:
+    """Concrete device string; downgrades a requested CUDA device to CPU if absent."""
+    if name and name.lower().startswith("cuda") and not torch.cuda.is_available():
+        return "cpu"
+    if name:
+        return name
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _load_yaml_config(path: str | os.PathLike[str]) -> dict[str, Any]:
+    """Load a YAML config, rejecting unknown keys so typos fail loudly."""
+    path = os.fspath(path)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"--config file not found: {path!r}")
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise SystemExit(
+            "--config requires PyYAML (pip install pyyaml), or omit --config and pass "
+            "hyperparameters as CLI flags instead."
+        ) from exc
+    with open(path, encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"config {path!r} must be a YAML mapping, got {type(data).__name__}")
+    unknown = sorted(set(data) - _VALID_CONFIG_KEYS)
+    if unknown:
+        raise ValueError(
+            f"config {path!r} has unrecognised key(s): {unknown}. "
+            f"Allowed keys: {sorted(_VALID_CONFIG_KEYS)}"
+        )
+    return data
+
+
+def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """Config keys explicitly supplied on the CLI (skip the unset ``None`` defaults)."""
+    overrides: dict[str, Any] = {}
+    for attr, key in _CLI_TO_CONFIG.items():
+        value = getattr(args, attr, None)
+        if value is not None:
+            overrides[key] = value
+    return overrides
+
+
+def _resolve_pretrained(cfg: dict[str, Any], args: argparse.Namespace) -> bool:
+    """``--no-pretrained-backbone`` forces off; otherwise config/default wins."""
+    if getattr(args, "no_pretrained_backbone", False):
+        return False
+    return bool(cfg.get("pretrained_backbone", True))
+
+
+def build_config(args: argparse.Namespace) -> dict[str, Any]:
+    """Assemble the ``train_with_progress`` config for a full training run.
+
+    Merge order (last wins): hard defaults < ``--config`` YAML < explicit CLI flags.
+    ``num_classes`` is derived from ``class_names`` and the injected
+    ``train_dataset`` is a :class:`_CocoSplitDataset` over ``--ann-file``.
+    """
+    _require_data_args(args)
+    cfg: dict[str, Any] = dict(_HARD_DEFAULTS)
+    if getattr(args, "config", None):
+        cfg.update(_load_yaml_config(args.config))
+    cfg.update(_cli_overrides(args))
+
+    class_names = parse_class_names(cfg["class_names"])
+    cfg["class_names"] = list(class_names)
+    cfg["num_classes"] = len(class_names)
+    cfg["device"] = _resolve_device(cfg.get("device"))
+    cfg["pretrained_backbone"] = _resolve_pretrained(cfg, args)
+    if cfg.get("use_amp") is None:
+        cfg["use_amp"] = torch.cuda.is_available()
+
+    cfg["train_dataset"] = _CocoSplitDataset(
+        cfg["ann_file"],
+        cfg["images_root"],
+        class_names,
+        img_size=cfg["img_size"],
+        augment=bool(cfg.get("augment", True)),
+    )
+    return cfg
+
+
+# ================================================================ modes
+def run_self_test(img_size: int = 128) -> int:
+    """One forward+backward on synthetic data. No dataset, no network.
+
+    Builds ``WeedDet(num_classes=3)`` and a 2-image batch of random tensors: one
+    image with two random boxes, one with **zero** GT (exercises the empty-target
+    branch of the loss). Asserts every loss is finite and ``total_loss``
+    backpropagates to finite gradients.
+    """
+    torch.manual_seed(0)
+    model = _WD.WeedDet(num_classes=3)
+    model.train()
+
+    images = torch.randn(2, 3, img_size, img_size)
+    targets = [
+        {
+            "boxes": torch.tensor([[10.0, 10.0, 50.0, 50.0], [60.0, 60.0, 110.0, 110.0]]),
+            "labels": torch.tensor([0, 2], dtype=torch.int64),
+        },
+        {
+            "boxes": torch.zeros((0, 4), dtype=torch.float32),
+            "labels": torch.zeros((0,), dtype=torch.int64),
+        },
+    ]
+
+    losses = model(images, targets)
+    for key, value in losses.items():
+        if not torch.isfinite(value).all():
+            raise ValueError(f"[self-test] non-finite loss {key}={value}")
+    total = losses["total_loss"]
+    total.backward()
+
+    grads = [p.grad for p in model.parameters() if p.grad is not None]
+    if not grads:
+        raise ValueError("[self-test] no gradients produced by total_loss.backward()")
+    if not all(torch.isfinite(g).all() for g in grads):
+        raise ValueError("[self-test] non-finite gradients")
+
+    reported = {k: round(float(v.detach()), 4) for k, v in losses.items()}
+    print(f"[self-test] losses={reported} | {len(grads)} grad tensors, all finite. PASS")
+    return 0
+
+
+def run_overfit(args: argparse.Namespace) -> int:
+    """Smoke gate: overfit the first N train images and assert the loss drops.
+
+    ``pretrained_backbone`` stays off unless a CUDA device is present (the ImageNet
+    loader fails closed offline). Runs a compact SGD loop that exercises the real
+    ``WeedDet`` forward/backward through the injected ``_CocoSplitDataset`` +
+    ``collate_fn``, then asserts final epoch loss < first epoch loss.
+    """
+    _require_data_args(args)
+    if args.overfit <= 0:
+        raise ValueError("--overfit expects a positive image count")
+
+    class_names = parse_class_names(args.class_names or DEFAULT_CLASS_NAMES)
+    device = torch.device(_resolve_device(args.device))
+    img_size = args.img_size or 512
+    seed = args.seed if args.seed is not None else 42
+    _WD.set_seed(seed, deterministic=True)
+
+    dataset = _CocoSplitDataset(
+        args.ann_file,
+        args.images_root,
+        class_names,
+        img_size=img_size,
+        augment=False,
+        limit=args.overfit,
+    )
+    if len(dataset) == 0:
+        raise ValueError(f"overfit dataset is empty for --ann-file {args.ann_file!r}")
+
+    batch_size = min(args.batch_size or 2, len(dataset))
+    loader: DataLoader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=_WD.collate_fn,
+        num_workers=0,
+    )
+
+    pretrained = (not args.no_pretrained_backbone) and torch.cuda.is_available()
+    model = _WD.WeedDet(num_classes=len(class_names)).to(device)
+    if pretrained:
+        _WD.load_imagenet_backbone(model)
+    _WD.apply_bn_policy(model, pretrained_loaded=pretrained)
+
+    optimizer = torch.optim.SGD(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.base_lr or 0.01,
+        momentum=0.9,
+        weight_decay=1e-4,
+    )
+    epochs = args.epochs or 60
+    print(
+        f"[overfit] {len(dataset)} images | bs={batch_size} | epochs={epochs} | "
+        f"device={device.type} | pretrained_backbone={pretrained}"
+    )
+
+    initial_loss: float | None = None
+    final_loss = float("nan")
+    for epoch in range(1, epochs + 1):
+        model.train()
+        _WD.apply_bn_policy(model, pretrained_loaded=pretrained)
+        running, n_batches = 0.0, 0
+        for images, targets in loader:
+            if not isinstance(images, torch.Tensor):
+                continue
+            images = images.to(device)
+            targets = [
+                {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()}
+                for t in targets
+            ]
+            optimizer.zero_grad(set_to_none=True)
+            loss = model(images, targets)["total_loss"]
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+            optimizer.step()
+            running += float(loss.item())
+            n_batches += 1
+        avg = running / max(n_batches, 1)
+        if initial_loss is None:
+            initial_loss = avg
+        final_loss = avg
+        print(f"[overfit] epoch {epoch:03d}/{epochs}  avg_loss={avg:.4f}")
+
+    if initial_loss is None or not (final_loss < initial_loss):
+        print(f"[overfit] FAILED: final {final_loss:.4f} !< initial {initial_loss:.4f}")
+        return 1
+    print(f"[overfit] PASSED: loss dropped {initial_loss:.4f} -> {final_loss:.4f}")
+    return 0
+
+
+# ================================================================ inference helpers
+def load_checkpoint_model(
+    checkpoint_path: str | os.PathLike[str],
+    num_classes: int | None = None,
+    device: str = "cpu",
+) -> Any:
+    """Load a ``WeedDet`` from a ``train_with_progress`` checkpoint for eval-mode use.
+
+    Reads the EMA ``state_dict`` (falls back to the raw model state) and infers
+    ``num_classes`` from the saved config when not given. Used by the Colab
+    qualitative cell so the notebook redefines no model logic.
+    """
+    checkpoint = torch.load(os.fspath(checkpoint_path), map_location=device)
+    if num_classes is None:
+        num_classes = int(checkpoint.get("config", {}).get("num_classes", 1))
+    model = _WD.WeedDet(num_classes=num_classes)
+    state = checkpoint.get("state_dict", checkpoint)
+    model.load_state_dict(state)
+    model.to(device).eval()
+    return model
+
+
+def predict_image(
+    model: Any,
+    image_path: str | os.PathLike[str],
+    img_size: int = 512,
+    device: str = "cpu",
+    score_thr: float = 0.3,
+) -> tuple[Any, Any, Any, Any]:
+    """Run eval-mode detection on one image; return (PIL image, boxes, scores, labels).
+
+    Boxes are mapped back to original-image pixel coordinates via the exact
+    inverse letterbox transform. Filtering at ``score_thr`` is for visual triage
+    only -- this is exploratory, not a calibrated operating point.
+    """
+    from PIL import Image
+
+    img = Image.open(os.fspath(image_path)).convert("RGB")
+    letterboxed, scale_x, scale_y, pad_left, pad_top = _WD.letterbox_pil(img, img_size)
+    transform = _WD.T.Compose(
+        [
+            _WD.T.ToTensor(),
+            _WD.T.Normalize(mean=_WD.IMAGENET_MEAN, std=_WD.IMAGENET_STD),
+        ]
+    )
+    tensor = transform(letterboxed).unsqueeze(0).to(device)
+
+    model.eval()
+    with torch.no_grad():
+        detections = model(tensor)[0]
+    boxes = detections["boxes"].detach().cpu()
+    scores = detections["scores"].detach().cpu()
+    labels = detections["labels"].detach().cpu()
+
+    keep = scores >= score_thr
+    boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
+    if len(boxes):
+        boxes = _WD.unpad_boxes(boxes, scale_x, scale_y, pad_left, pad_top)
+    return img, boxes.numpy(), scores.numpy(), labels.numpy()
+
+
+# ================================================================ CLI
+def _require_data_args(args: argparse.Namespace) -> None:
+    """Fail with an actionable message when data paths are needed but missing."""
+    missing = [
+        flag
+        for flag, value in (("--ann-file", args.ann_file), ("--images-root", args.images_root))
+        if not value
+    ]
+    if missing:
+        raise SystemExit(
+            f"missing required argument(s): {', '.join(missing)}. Provide the TRAIN split "
+            "COCO json and the extracted images root, e.g. --ann-file "
+            "artifacts/detector_v1/split_v1/train.coco.json --images-root /path/to/RiceSEG. "
+            "(Use --self-test for a no-data smoke check.)"
+        )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="agrinav train-detector",
+        description=(
+            "Exploratory WeedDet detector training on a COCO split "
+            "(loss convergence + qualitative val predictions; the test split is sealed)."
+        ),
+    )
+    parser.add_argument(
+        "--ann-file", help="path to the TRAIN split COCO json (never test.coco.json)"
+    )
+    parser.add_argument(
+        "--images-root",
+        help="directory joined with each record's file_name (extracted RiceSEG root)",
+    )
+    parser.add_argument(
+        "--class-names",
+        default=None,
+        help="comma list mapped to contiguous label ids "
+        f"(default: {','.join(DEFAULT_CLASS_NAMES)})",
+    )
+    parser.add_argument(
+        "--img-size", type=int, default=None, help="square letterbox size (default: 512)"
+    )
+    parser.add_argument("--batch-size", type=int, default=None, help="images per step (default: 4)")
+    parser.add_argument("--epochs", type=int, default=None, help="training epochs (default: 12)")
+    parser.add_argument(
+        "--base-lr", type=float, default=None, help="SGD base learning rate (default: 0.001)"
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        default=None,
+        help="output dir for weeddet_best.pth (default: checkpoints/weeddet)",
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=None, help="DataLoader workers (default: 2)"
+    )
+    parser.add_argument(
+        "--save-every", type=int, default=None, help="periodic checkpoint epoch stride"
+    )
+    parser.add_argument("--repeat-factor", type=int, default=None, help="dataset repeats per epoch")
+    parser.add_argument(
+        "--no-pretrained-backbone",
+        action="store_true",
+        help="skip the ImageNet warm-start (required offline / on CPU)",
+    )
+    parser.add_argument(
+        "--device", default=None, help="cuda or cpu (default: cuda if available, else cpu)"
+    )
+    parser.add_argument("--seed", type=int, default=None, help="RNG seed (default: 42)")
+    parser.add_argument(
+        "--config", default=None, help="optional YAML seeding defaults; CLI flags override it"
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--self-test",
+        action="store_true",
+        help="one forward+backward on synthetic data; no dataset, no network",
+    )
+    mode.add_argument(
+        "--overfit",
+        type=int,
+        default=0,
+        metavar="N",
+        help="overfit the first N train images and assert the loss drops (smoke gate)",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int | None:
+    """Dispatch to a mode. Returns a process exit code (0 = success)."""
+    args = _build_parser().parse_args(argv)
+
+    if args.self_test:
+        return run_self_test()
+    if args.overfit and args.overfit > 0:
+        return run_overfit(args)
+
+    config = build_config(args)
+    _WD.train_with_progress(config)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

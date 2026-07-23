@@ -37,6 +37,7 @@ COMMANDS: dict[str, str] = {
     # --- training ---
     "pretrain": "agrinav.training.riceseg_pretrain",
     "baseline-seg": "agrinav.training.baseline_seg_control",
+    "train-detector": "agrinav.training.weeddet_train",
 }
 
 
