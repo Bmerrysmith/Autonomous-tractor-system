@@ -19,8 +19,40 @@
 3. `active/ACTIVE_NOTES.md` — current priorities and stop conditions
 4. `TEST_LOG.md` — historical T0–T7c experiment record; reconcile it with the July 20 audit before reuse
 5. `HANDOFF_2026-07-16.md` — historical session handoff, retained for provenance
+6. `docs/research/PERCEPTION_RESEARCH_PACKAGE_2026-07-20.md` — perception-only success targets, comparable datasets, annotation stack, architecture decision, and controlled RiceSEG study
+7. `docs/annotation_guide.md` — canonical crop-protection/weed-target mask rules and human-review gates
+8. `docs/research/PERCEPTION_ACCEPTANCE_MATRIX_2026-07-20.md` — extracted requirements, evidence status, unresolved decisions, and exact go/no-go gates
 
-## Folder structure (recovered 2026-07-20)
+## Setup
+
+AgriNav is an installable package (`agrinav`, `src/` layout, Python 3.11+).
+
+```bash
+python -m venv .venv
+. .venv/Scripts/activate          # Windows; use  . .venv/bin/activate  on macOS/Linux
+pip install -e ".[dev]"           # runtime + training stack + lint/test tools
+pre-commit install                # optional: run hooks on commit
+```
+
+Common commands (also wrapped by the `Makefile`):
+
+```bash
+agrinav --help                                          # unified CLI (data + training tools)
+python -m agrinav.training.riceseg_pretrain --self-test  # contract check, no data needed
+pytest                                                  # full test suite (CPU)
+ruff check . && black --check .                          # lint + format
+```
+
+Install variants: `pip install -e ".[train]"` (runtime + torch/transformers, e.g. Colab —
+this is what `requirements.txt` now installs); `pip install -e "."` (data-tooling base only,
+no deep-learning stack). Dependencies live in `pyproject.toml`; see `docs/adr/` for the
+`src/` layout and packaging/CI decisions.
+
+## Folder structure
+
+> The tree below is a 2026-07-20 recovery snapshot. The authoritative package
+> layout is now `src/agrinav/` (see `docs/adr/0001-src-layout.md`); some historical
+> root documents have since moved under `_archive/`.
 
 ```
 agrinav_full/
@@ -40,17 +72,18 @@ agrinav_full/
 ├── docs/
 │   ├── ARTIFACT_INVENTORY.md           ← hashes and artifact dispositions
 │   └── audits/2026-07-20/              ← deep audit + deployment roadmap
-├── models/
-│   └── weeddet_v6b.py                 ← CURRENT model (T1 fix: atss_all_neg; cls_hard_target)
-├── training/
-│   └── riceseg_pretrain.py            ← RiceSEG → WeedDet backbone pretraining
-├── data/
-│   ├── auto_annotate.py
+├── src/agrinav/                       ← installable package (import root: `agrinav`)
+│   ├── cli.py                         ← unified `agrinav` CLI dispatcher
+│   ├── models/weeddet_v6b.py          ← CURRENT model (held byte-stable; open Gate-4 bugs)
+│   ├── training/                      ← riceseg_pretrain.py, baseline_seg_control.py
+│   ├── data/                          ← annotation + dataset tooling (former scripts/*.py)
+│   └── inference/                     ← disabled safety stub; no deployable runtime yet
+├── data/                             ← data ARTIFACTS (not a package): manifests/, schemas/
 │   └── rice_training_curated/         ← local-only RiceSEG-derived curation set
 │       ├── README.md                   ← provenance, citation, and publication policy
 │       ├── manifest.csv               ← per-image QA scores (versioned)
 │       └── AUDIT_REPORT.md            ← curation method + site table (versioned)
-├── inference/                         ← disabled safety stub; no deployable runtime yet
+│   (auto_annotate.py now lives in _archive/unsafe_inference/)
 ├── paper/                             ← IEEE paper revision docs
 ├── drive_links/GOOGLE_DRIVE_INVENTORY.md
 └── archive/

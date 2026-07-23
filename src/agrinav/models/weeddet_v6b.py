@@ -214,29 +214,74 @@ def soft_nms(boxes, scores, iou_threshold=0.50, sigma=0.5,
 # LETTERBOX UTILITIES
 # ===========================================================================
 
-def letterbox_pil(img, size=512, fill=114):
-    """
-    Resize PIL image to square `size` with grey letterbox padding.
-    Returns (letterboxed_img, scale, pad_left, pad_top).
+def translate_image_and_boxes(img, boxes, labels, dx, dy,
+                              fill=(114, 114, 114), min_size=2):
+    """Translate visible image content AND its boxes by the SAME (+dx, +dy).
+
+    AUDIT FIX (P0-1). Pillow's affine tuple maps OUTPUT coordinates back into
+    INPUT coordinates, so `(1, 0, dx, 0, 1, dy)` samples from x+dx and makes
+    content move LEFT for a positive dx — while the old code added +dx to the
+    boxes, moving labels RIGHT. That systematically corrupted ~half of all
+    augmented training samples. Negating the offsets in the affine tuple makes
+    content move by (+dx, +dy), matching the box update.
+
+    AUDIT FIX (P1-10). `labels` are filtered with the SAME keep mask as boxes,
+    so a clipped-away object never leaves its class behind to be mis-assigned
+    to a different box by a prefix fallback.
+
+    Returns (img, boxes, labels).
     """
     from PIL import Image as PILImage
     w, h = img.size
-    scale = size / max(w, h)
-    nw, nh = int(w * scale), int(h * scale)
+    img = img.transform(
+        img.size, PILImage.AFFINE, (1, 0, -dx, 0, 1, -dy), fillcolor=fill)
+    if boxes is not None and len(boxes):
+        boxes = boxes.clone().float()
+        boxes[:, [0, 2]] = (boxes[:, [0, 2]] + dx).clamp(0, w)
+        boxes[:, [1, 3]] = (boxes[:, [1, 3]] + dy).clamp(0, h)
+        keep = (((boxes[:, 2] - boxes[:, 0]) >= min_size) &
+                ((boxes[:, 3] - boxes[:, 1]) >= min_size))
+        boxes = boxes[keep]
+        if labels is not None and len(labels) == len(keep):
+            labels = labels[keep]
+    return img, boxes, labels
+
+
+def letterbox_pil(img, size=512, fill=114):
+    """
+    Resize PIL image to square `size` with grey letterbox padding.
+    Returns (letterboxed_img, scale_x, scale_y, pad_left, pad_top).
+
+    AUDIT FIX (P1-8): the integer resize means the realised x and y scales
+    differ slightly from the nominal `size / max(w, h)`. Returning the exact
+    per-axis scales keeps the forward and inverse mappings consistent (the old
+    single nominal scale introduced up to ~1 px of avoidable error, which
+    matters for tiny objects and AP75).
+    """
+    from PIL import Image as PILImage
+    w, h = img.size
+    nominal = size / max(w, h)
+    nw, nh = int(w * nominal), int(h * nominal)
+    nw, nh = max(nw, 1), max(nh, 1)
+    scale_x, scale_y = nw / w, nh / h
     resized = img.resize((nw, nh), PILImage.BILINEAR)
     canvas = PILImage.new('RGB', (size, size), (fill, fill, fill))
     pad_left = (size - nw) // 2
     pad_top  = (size - nh) // 2
     canvas.paste(resized, (pad_left, pad_top))
-    return canvas, scale, pad_left, pad_top
+    return canvas, scale_x, scale_y, pad_left, pad_top
 
 
-def unpad_boxes(boxes, scale, pad_left, pad_top):
-    """Invert letterbox transform on predicted boxes → original image coords."""
+def unpad_boxes(boxes, scale_x, scale_y, pad_left, pad_top):
+    """Invert letterbox transform on predicted boxes → original image coords.
+
+    Uses the same exact per-axis scales returned by `letterbox_pil`.
+    """
     boxes = boxes.clone().float()
     boxes[:, [0, 2]] -= pad_left
     boxes[:, [1, 3]] -= pad_top
-    boxes /= scale
+    boxes[:, [0, 2]] /= scale_x
+    boxes[:, [1, 3]] /= scale_y
     return boxes
 
 # ===========================================================================
@@ -392,8 +437,15 @@ def load_imagenet_backbone(model, verbose=True):
         except AttributeError:  # torchvision < 0.13
             tv_sd = tvm.resnet50(pretrained=True).state_dict()
     except Exception as exc:
-        print(f'[pretrained] FAILED to fetch torchvision resnet50: {exc}')
-        return 0, 0
+        # AUDIT FIX (P1-9): fail closed. Returning (0, 0) here silently turned a
+        # labelled "ImageNet" experiment into an unlabelled scratch run, because
+        # callers did not check the match count.
+        raise RuntimeError(
+            f'ImageNet backbone load FAILED to fetch torchvision resnet50: {exc}. '
+            'Refusing to continue — an unchecked failure would mislabel a scratch '
+            'run as ImageNet-initialised. Fix connectivity/weights, or explicitly '
+            'request a scratch run.'
+        ) from exc
 
     mapped = {}
     for k, v in tv_sd.items():
@@ -640,10 +692,25 @@ class CIoULoss(nn.Module):
         return (1 - ciou).mean()
 
 
-class VariFocalLoss(nn.Module):
-    """
-    VariFocal Loss: replaces standard Focal Loss.
-    alpha=0.75, gamma=2.0 from paper.
+class HardTargetFocalLikeLoss(nn.Module):
+    """Custom focal-style binary classification loss with HARD positive targets.
+
+    AUDIT FIX (P1-1) — HONEST NAMING. This is deliberately *not* called
+    "VariFocal Loss", because it does not implement the published VarifocalNet
+    objective:
+
+      * published VFL weights positives by the target IoU score itself and
+        trains an IoU-Aware Classification Score (IACS);
+      * this implementation weights positives by ``target * |target - p|^gamma``
+        and, with ``cls_hard_target=True``, sets positive targets to 1.0.
+
+    So classification confidence here is NOT trained to rank boxes by
+    localisation quality — a plausible contributor to the observed
+    high-confidence/poor-localisation duplicates and near-zero AP75. If a real
+    VFL/IACS comparison is wanted it must be implemented separately and
+    ablated against this loss under one locked assigner and evaluator.
+
+    ``VariFocalLoss`` remains as a backwards-compatible alias.
     """
     def __init__(self, alpha=0.75, gamma=2.0):
         super().__init__()
@@ -660,6 +727,11 @@ class VariFocalLoss(nn.Module):
         )
         loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
         return (loss * weight).sum()
+
+
+# Backwards-compatible alias. The name is historically inaccurate (see the
+# class docstring); prefer HardTargetFocalLikeLoss in new code.
+VariFocalLoss = HardTargetFocalLikeLoss
 
 
 class WeedDetLoss(nn.Module):
@@ -709,6 +781,30 @@ class WeedDetLoss(nn.Module):
         ph = torch.exp(deltas[:, 3].clamp(max=4)) * ah
         return torch.stack([px - pw/2, py - ph/2, px + pw/2, py + ph/2], dim=1)
 
+    def _force_one_positive_per_gt(self, ious, pos, best, quality):
+        """Guarantee every GT owns at least one positive anchor, collision-safe.
+
+        AUDIT FIX (P1-3). The previous vectorised write
+        ``pos[gt_best_anchor] = True`` used advanced indexing, so if two GTs
+        picked the SAME best anchor the later write overwrote the earlier and a
+        ground-truth object silently ended up with no positive. Here the
+        strongest GT claims a contested anchor and the loser falls back to its
+        next-best *unclaimed* anchor.
+        """
+        device = ious.device
+        gt_best_iou, gt_best_anchor = ious.max(dim=0)
+        claimed = torch.zeros(ious.shape[0], dtype=torch.bool, device=device)
+        for g in torch.argsort(gt_best_iou, descending=True).tolist():
+            col = ious[:, g].masked_fill(claimed, -1.0)
+            a = int(col.argmax().item())
+            if float(col[a]) < 0.0:          # degenerate: fewer anchors than GTs
+                a = int(gt_best_anchor[g].item())
+            claimed[a] = True
+            pos[a] = True
+            best[a] = g
+            quality[a] = ious[a, g]
+        return pos, best, quality
+
     def _assign_atss(self, anchors, gt_boxes, ious, num_anchors_per_level=None):
         """
         ATSS-style adaptive positive assignment.
@@ -719,7 +815,10 @@ class WeedDetLoss(nn.Module):
         if (not self.use_atss) or not num_anchors_per_level:
             pos = max_iou >= self.iou_threshold
             neg = max_iou < self.neg_iou_threshold
-            return pos, neg, best, max_iou
+            # The fallback path must also guarantee per-GT coverage (audit P1-3).
+            pos, best, quality = self._force_one_positive_per_gt(
+                ious, pos.clone(), best.clone(), max_iou.clone())
+            return pos, neg & ~pos, best, quality
 
         num_gt = gt_boxes.shape[0]
         device = anchors.device
@@ -727,15 +826,28 @@ class WeedDetLoss(nn.Module):
         gt_centers = (gt_boxes[:, :2] + gt_boxes[:, 2:]) * 0.5
         distances = ((centers[:, None, :] - gt_centers[None, :, :]) ** 2).sum(dim=2)
 
+        # AUDIT FIX (P1-2): select top-k distinct CELLS per level, then take every
+        # anchor shape at those cells. All co-located shapes share one centre, so
+        # the old per-anchor top-k could return k shapes at a single cell instead
+        # of k nearby spatial locations, destroying the neighbourhood ATSS needs
+        # to compute its mean+std IoU threshold.
         candidate_idxs = []
         start = 0
         for n_level in num_anchors_per_level:
             end = start + n_level
             if end <= start:
                 continue
-            k = min(self.atss_topk, end - start)
-            _, topk_idxs = distances[start:end].topk(k, dim=0, largest=False)
-            candidate_idxs.append(topk_idxs + start)
+            lvl_centers = centers[start:end]
+            # Anchors sharing the first centre = shapes per cell (grid centres are unique).
+            per_cell = int((lvl_centers == lvl_centers[0]).all(dim=1).sum().item()) or 1
+            n_cells = max(n_level // per_cell, 1)
+            cell_dist = distances[start:end:per_cell][:n_cells]      # [n_cells, num_gt]
+            k = min(self.atss_topk, n_cells)
+            _, topk_cells = cell_dist.topk(k, dim=0, largest=False)  # [k, num_gt]
+            cell_base = start + topk_cells * per_cell                # [k, num_gt]
+            offsets = torch.arange(per_cell, device=device).view(per_cell, 1, 1)
+            idxs = (cell_base.unsqueeze(0) + offsets).reshape(k * per_cell, num_gt)
+            candidate_idxs.append(idxs)
             start = end
 
         if not candidate_idxs:
@@ -767,11 +879,13 @@ class WeedDetLoss(nn.Module):
         pos = assigned_iou >= 0
         best = assigned_gt.clamp(min=0)
 
-        # Guarantee at least one positive anchor per GT to avoid empty positives.
-        gt_best_iou, gt_best_anchor = ious.max(dim=0)
-        pos[gt_best_anchor] = True
-        best[gt_best_anchor] = gt_arange
-        assigned_iou[gt_best_anchor] = gt_best_iou
+        # Guarantee one positive per GT, collision-safe (audit P1-3).
+        pos, best, assigned_iou = self._force_one_positive_per_gt(
+            ious, pos, best, assigned_iou)
+
+        # Post-condition: every ground-truth object owns at least one positive.
+        assert torch.unique(best[pos]).numel() >= min(num_gt, int(pos.sum().item())), (
+            'ATSS assignment orphaned a ground-truth object')
 
         # T1 FIX: all non-positives are negatives (ATSS-paper semantics).
         # Old ignore band (max_iou in [neg_iou_threshold, pos)) kept behind the flag.
@@ -1060,7 +1174,13 @@ class WeedDataset(Dataset):
         return (torch.zeros((0,4), dtype=torch.float32),
                 torch.zeros((0,),  dtype=torch.int64), orig_w, orig_h)
 
-    def _augment(self, img, boxes):
+    def _augment(self, img, boxes, labels=None):
+        """Geometric + photometric augmentation.
+
+        AUDIT FIX (P0-1/P1-10): translation now moves image content and boxes in
+        the SAME direction, and `labels` are carried through every keep mask so
+        boxes and classes can never desynchronise. Returns (img, boxes, labels).
+        """
         import random
         from PIL import ImageFilter, ImageEnhance, ImageOps
 
@@ -1073,19 +1193,12 @@ class WeedDataset(Dataset):
                 boxes = boxes.clone()
                 boxes[:, [0,2]] = w - boxes[:, [2,0]]
 
-        # Translation +/-10% — FIX: affine fill replaces wraparound offset
+        # Translation +/-10% (joint image+box+label transform)
         if random.random() > 0.5 and len(boxes):
             dx = int(random.uniform(-0.1, 0.1) * w)
             dy = int(random.uniform(-0.1, 0.1) * h)
-            img = img.transform(
-                img.size, self.PILImage.AFFINE,
-                (1, 0, dx, 0, 1, dy), fillcolor=(114, 114, 114)
-            )
-            boxes = boxes.clone().float()
-            boxes[:, [0,2]] = (boxes[:, [0,2]] + dx).clamp(0, w)
-            boxes[:, [1,3]] = (boxes[:, [1,3]] + dy).clamp(0, h)
-            keep  = ((boxes[:,2]-boxes[:,0]) >= 2) & ((boxes[:,3]-boxes[:,1]) >= 2)
-            boxes = boxes[keep]
+            img, boxes, labels = translate_image_and_boxes(
+                img, boxes, labels, dx, dy)
 
         # Brightness
         if random.random() > 0.5:
@@ -1104,7 +1217,7 @@ class WeedDataset(Dataset):
         if random.random() < 0.15:
             img = ImageOps.equalize(img)
 
-        return img, boxes
+        return img, boxes, labels
 
     def __getitem__(self, idx):
         stem     = self.ids[idx]
@@ -1122,19 +1235,21 @@ class WeedDataset(Dataset):
             os.path.join(ann_dir, stem + '.xml'))
 
         if self.augment and len(boxes):
-            img, boxes = self._augment(img, boxes)
+            img, boxes, labels = self._augment(img, boxes, labels)
 
-        # Letterbox to square
-        img_lb, scale, pl, pt = letterbox_pil(img, self.img_size)
+        # Letterbox to square (exact per-axis scales — audit P1-8)
+        img_lb, sx, sy, pl, pt = letterbox_pil(img, self.img_size)
 
         # Scale boxes to letterbox space
         if len(boxes):
             boxes = boxes.clone().float()
-            boxes[:, [0,2]] = (boxes[:, [0,2]] * scale + pl).clamp(0, self.img_size)
-            boxes[:, [1,3]] = (boxes[:, [1,3]] * scale + pt).clamp(0, self.img_size)
+            boxes[:, [0,2]] = (boxes[:, [0,2]] * sx + pl).clamp(0, self.img_size)
+            boxes[:, [1,3]] = (boxes[:, [1,3]] * sy + pt).clamp(0, self.img_size)
             keep  = ((boxes[:,2]-boxes[:,0]) >= 1) & ((boxes[:,3]-boxes[:,1]) >= 1)
             boxes  = boxes[keep]
-            labels = labels[keep] if len(labels) == len(keep) else labels[:keep.sum()]
+            # AUDIT FIX (P1-10): never fall back to a prefix slice — that
+            # silently re-labels surviving boxes with another object's class.
+            labels = labels[keep]
 
         return self.transform(img_lb), {
             'boxes' : boxes,
@@ -1215,13 +1330,14 @@ class CocoWeedDataset(WeedDataset):
         # _augment only touches columns 0-3 and row-filters, so carrying the
         # label as a 5th column keeps boxes/labels aligned through box drops.
         if self.augment and len(b5):
-            img, b5 = self._augment(img, b5)
+            img, b5, _ = self._augment(img, b5)
 
-        img_lb, scale, pl, pt = letterbox_pil(img, self.img_size)
+        # Exact per-axis letterbox scales (audit P1-8)
+        img_lb, sx, sy, pl, pt = letterbox_pil(img, self.img_size)
         boxes, labels = b5[:, :4].clone(), b5[:, 4].long()
         if len(boxes):
-            boxes[:, [0, 2]] = (boxes[:, [0, 2]] * scale + pl).clamp(0, self.img_size)
-            boxes[:, [1, 3]] = (boxes[:, [1, 3]] * scale + pt).clamp(0, self.img_size)
+            boxes[:, [0, 2]] = (boxes[:, [0, 2]] * sx + pl).clamp(0, self.img_size)
+            boxes[:, [1, 3]] = (boxes[:, [1, 3]] * sy + pt).clamp(0, self.img_size)
             keep   = ((boxes[:, 2] - boxes[:, 0]) >= 1) & ((boxes[:, 3] - boxes[:, 1]) >= 1)
             boxes, labels = boxes[keep], labels[keep]
 
