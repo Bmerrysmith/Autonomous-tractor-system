@@ -27,9 +27,24 @@ train-detector`) or the new Colab notebook. The first GPU run is **exploratory**
 **deferred Gate-4 remainder** (COCO evaluator + canonical postprocess P1-6 + perf
 P1-4/P1-5). Test split is **sealed** everywhere; selection is on val.
 
-**The RiceSEG overfit gate PASSED for the first time (2026-07-23, Colab GPU):
-best mIoU 0.8631 >= 0.8000.** Full `ImageNet->RiceSEG` pretraining (30 ep / 512px
-/ batch 12) is now **unblocked**. The gate had been failing on a pipeline that was
+**PHASE 1 (seg pretraining) IS CLOSED.** The overfit gate passed for the first
+time (best mIoU 0.8631 >= 0.8000), and the full `ImageNet->RiceSEG` production run
+then completed: **best mIoU 0.5827 @ epoch 30**, backbone at
+`MyDrive/agrinav_data/out/riceseg_backbone.pth`. It **reproduces the 2026-07-21
+run within 0.001 mIoU** (same split/seed/recipe, best epochs 11 apart) — a
+reproducibility check, not an improvement. **Decision 2026-07-23: not training it
+further.** The plateau is not a step-budget problem (30 ep here = ~6,900 steps vs
+1,000 for the whole 500-epoch gate; val flat since ep19 while train loss kept
+falling; senescent is a data ceiling across both architectures). Minority levers
+(`focal_tversky`, `dice_weighted`, `warmup`/`backbone-lr-mult`) are built but
+deliberately untried on full data. Full analysis:
+`docs/research/RICESEG_PRETRAIN_RESULTS.md`.
+
+**Next phase: the detector.** The open question this backbone exists to answer is
+whether it beats ImageNet-only on detector mAP — no further seg training answers
+that.
+
+The gate had been failing on a pipeline that was
 never broken — two defects in the *gate* were fixed (class-coverage truncation +
 epoch-floored instead of step-floored budget). Threshold 0.80 is **validated, not
 lowered**. Details and evidence: `docs/research/RICESEG_PRETRAIN_RESULTS.md`.
@@ -145,11 +160,14 @@ ruff check . && black --check .
 
 ## Open items (needs owner / decision)
 
-- [ ] **Run full `ImageNet->RiceSEG` pretraining** (30 ep / 512px / batch 12 /
-      seed 42) — **unblocked**, the overfit gate passed 0.8631. Cell 7 of
-      `notebooks/riceseg_pretrain_colab.ipynb`. Expect val mIoU **far below**
-      0.86: the gate memorises 8 tiles, the real run uses a group-aware split.
-      Record the manifest in `docs/research/RICESEG_PRETRAIN_RESULTS.md`.
+- [x] ~~Run full `ImageNet->RiceSEG` pretraining~~ — **DONE 2026-07-23**, best
+      mIoU 0.5827 @ ep30. Phase closed; see results log for why it was not
+      extended.
+- [ ] **Paste the run manifest fields** (`git_commit`, backbone `sha256`, env
+      versions) from `MyDrive/agrinav_data/out/riceseg_backbone.pth.manifest.json`
+      into the `2026-07-23` run entry in
+      `docs/research/RICESEG_PRETRAIN_RESULTS.md` — they are marked *not
+      captured* there, so the run currently lacks full provenance.
 - [ ] **Phase-2b data decision — `rice-weed-seg` (2,579 imgs).** The two fresh
       Roboflow exports (`.coco` and `.coco-segmentation`) are **byte-equivalent
       in content** (same images, same per-image ann counts, polygon areas within

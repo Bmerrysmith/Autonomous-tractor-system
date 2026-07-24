@@ -335,3 +335,105 @@ Fix landed in `master` (`8946981`); regression tests in
 is now unblocked.
 
 ---
+
+## Run: `2026-07-23 ImageNet→RiceSEG (production, Colab GPU)` — FINAL, phase closed
+
+**Condition:** `ImageNet→RiceSEG`. Recipe identical to the 2026-07-21 production
+run (`ce_dice`, `warmup 0`, `backbone_mult 1.0`); the only change is the new
+default checkpoint selector (`minority`).
+
+**Command**
+
+```
+python -B -u -m agrinav.training.riceseg_pretrain \
+  --data-root <RiceSEG> --epochs 30 --batch-size 12 --img-size 512 \
+  --lr 3e-4 --val-ratio 0.1 --seed 42 \
+  --out MyDrive/agrinav_data/out/riceseg_backbone.pth
+```
+
+**Provenance**
+
+| Field | Value |
+|---|---|
+| seed | 42 |
+| device | cuda (Colab) |
+| tiles / train / val | 3078 / 2769 / 309 (group-aware by source photo; 0 source overlap) |
+| countries | China, India, Japan, Philippines, Tanzania |
+| imagenet_coverage | 288 / 342 (0 missed) |
+| class weights | bg 0.5, green_veg 0.5, senescent 1.16, panicle 0.88, weeds 2.28, duckweed 3.75 |
+| selection | `minority` over `weeds,duckweed,senescent`, EMA 0.6 |
+| git_commit / backbone sha256 / env versions | **not captured in this log** — read them from `riceseg_backbone.pth.manifest.json` in Drive and paste here |
+
+**Result — best epoch 30, mIoU 0.5827**
+
+| class | IoU @ best | last-5-epoch mean (26–30) |
+|---|---|---|
+| background | 0.87 | 0.87 |
+| green_veg | 0.87 | 0.87 |
+| panicle | 0.74 | 0.74 |
+| senescent | 0.35 | 0.348 |
+| duckweed | 0.36 | 0.356 |
+| **weeds** | **0.32** | **0.278 ± 0.026** |
+| **mIoU** | **0.5827** | 0.5769 |
+
+Selector exported epoch 30 (`minority` 0.3298, its maximum) — which is also the
+best-mIoU epoch, so it did **not** latch onto a noisy weeds peak this time. That
+is the behaviour it was added for.
+
+### Reproducibility: this run reproduces 2026-07-21
+
+Same split, same seed, same recipe, best epochs 11 apart:
+
+| | 2026-07-21 | 2026-07-23 |
+|---|---|---|
+| best mIoU | 0.5816 @ ep19 | 0.5827 @ ep30 |
+| senescent / panicle | 0.337 / 0.738 | 0.35 / 0.74 |
+| weeds / duckweed | 0.337 / 0.343 | 0.32 / 0.36 |
+
+**Within 0.001 mIoU.** Treat this as a genuine reproducibility check on the
+group-aware split + seed, not as an independent improvement. weeds stability did
+improve — last-5 mean **0.278 ± 0.026** here vs **0.202 ± 0.053** recorded around
+ep19 in July (different epoch windows, so read it as directional only).
+
+### Why this run was NOT extended (decision: 2026-07-23)
+
+The question raised was whether to re-run at ~160 epochs, by analogy with the
+overfit gate, which needed ~160 epochs to pass. **Epochs are not comparable units
+between the two:**
+
+| | gate | this run |
+|---|---|---|
+| tiles / batch | 8 / 4 | 2769 / 12 |
+| steps per epoch | 2 | 230 |
+| total steps | 1,000 (500 ep) | **~6,900 (30 ep)** |
+
+This run already had ~7× the optimiser steps of the entire gate run. The evidence
+says the plateau is not a step-budget problem:
+
+- **Reproducible ceiling** — two independent runs, best epochs 19 and 30, land
+  within 0.001 mIoU.
+- **Val flat while train falls** — val mIoU has oscillated 0.54–0.58 since ep19
+  with no upward slope, while train loss fell 0.37 → 0.31. The widening gap is
+  onset of overfitting; more epochs pushes the wrong way.
+- **LR already annealed** to ~3e-6 by ep30, so "more epochs" means a *different*
+  cosine, not more of this one.
+- **senescent is a data ceiling**, not undertraining — flat 0.34–0.35 for the
+  last 16 epochs, 0.337 in July, and ~0.36 for the DeepLabV3 control too (see
+  "Baseline architecture control" above). Needs more real minority instances.
+
+**Decision: pretraining phase closed.** This backbone is a feature initialiser
+for the detector, not a deployable segmenter; the question that matters next is
+whether it beats ImageNet-only on detector mAP, which no amount of seg-epochs
+answers.
+
+### Levers deliberately left untried on full data
+
+Built 2026-07-23 for exactly this minority problem, never yet run on the full
+dataset. If minority IoU is revisited, run these **one variable at a time**
+(CLAUDE.md §14.2), not stacked:
+
+- `--loss focal_tversky`
+- `--dice-weighted --dice-ignore-bg`
+- `--warmup-epochs 2 --backbone-lr-mult 0.1` (aimed at the weeds oscillation)
+
+---
