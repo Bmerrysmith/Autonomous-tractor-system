@@ -17,15 +17,43 @@ It is intentionally short: a *pointer*, not a log. Detailed history lives in git
 
 ---
 
-## Current status — 2026-07-23
+## Current status — 2026-07-27
 
-**Phase-2 detector training pipeline (exploratory) is built, smoke-validated, and
-independently reviewed and committed.** The `weeddet_v6b` detector can now be
-trained on the grouped, leakage-free RiceSEG split from a CLI (`agrinav
-train-detector`) or the new Colab notebook. The first GPU run is **exploratory**
-(loss convergence + qualitative val predictions); a defensible mAP still needs the
-**deferred Gate-4 remainder** (COCO evaluator + canonical postprocess P1-6 + perf
-P1-4/P1-5). Test split is **sealed** everywhere; selection is on val.
+**Detector can now warm-start from the RiceSEG backbone, and phase-2 (real RICE
+data, not RiceSEG) is wired end to end.** `weeddet_train.py` gained
+`--riceseg-backbone PATH`: a picklable `_RicesegBackboneInit` callable (module-level,
+survives checkpoint pickling) that loads the phase-1 backbone instead of ImageNet
+and leaves BN trainable (in-domain running stats). Omit the flag for the
+ImageNet-only control — same command, one flag, that's the whole A/B. Merged to
+`master` `e16ddaa`.
+
+New: `configs/training/detector_rice_phase2.yaml` (2-class:
+`rice_protect`/`weed_target`, num_classes derived from `class_names`) +
+`notebooks/weeddet_rice_phase2_colab.ipynb` (21 cells) targeting the **curated,
+grouped RICE split**, not RiceSEG and not Roboflow's leaky native split. Merged
+`master` `8cd1832`.
+
+**Blocking on the user:** upload `RICE_curated_phase2.zip` (932 MB, built from
+`Downloads/agrinav_intake_2026-07-21/deliverable/detection/RICE/`, sha256
+`2161e069…`, test split verifiably absent) to
+`MyDrive/agrinav_data/rice_phase2/`, then run the notebook. Nothing else is
+required to start a real phase-2 training run.
+
+Git LFS was installed locally but is **not used and should not be** — nothing
+tracked, `.gitattributes` unchanged, `artifacts/`/`*.pth` stay gitignored. GitHub
+free tier is 1 GiB storage + 1 GiB bandwidth/month; the notebook clones the repo
+fresh every Colab session, so committing the 932 MB image set via LFS would burn
+the monthly bandwidth quota on the first run. Drive stays correct for data;
+DVC remains the CLAUDE.md-prescribed answer if this needs proper versioning later
+(still not set up).
+
+The detector pipeline (either backbone) is still **exploratory** — checkpoint
+selection is train-loss only, there's no mAP cell, because the canonical decode
+(Gate-4 remainder, P1-6) doesn't exist yet. Test split is **sealed** everywhere.
+
+Phase-2 detector training pipeline (loader/CLI/smoke) is built, smoke-validated,
+and independently reviewed and committed — see the 2026-07-23 entry below for
+that work.
 
 **PHASE 1 (seg pretraining) IS CLOSED.** The overfit gate passed for the first
 time (best mIoU 0.8631 >= 0.8000), and the full `ImageNet->RiceSEG` production run
@@ -106,6 +134,38 @@ recommended base `chore/gate1-packaging-ci` ← `feat/riceseg-training-optimizat
 
 Full deployable run (30 ep / 512px / batch 8 / ImageNet on) still pending on a GPU.
 
+## Done this session (2026-07-27 — RiceSEG backbone hookup + phase-2 RICE data)
+
+- `weeddet_train.py`: `_RicesegBackboneInit` (module-level class, not a closure —
+  configs get pickled into checkpoints, so the callable must survive
+  `torch.load`), `_make_riceseg_backbone_init()` (raises `FileNotFoundError` on a
+  bad path before training starts), `--riceseg-backbone` CLI flag,
+  `"riceseg_backbone": None` in `_HARD_DEFAULTS` + `_CLI_TO_CONFIG`.
+  `build_config` sets `pretrained_backbone = False` when the flag is present, so
+  the saved config is unambiguous about which init path ran.
+- `weeddet_v6b.py`: two guarded seams in `train_with_progress`, both
+  `if key is None: <original behavior>` — `config['backbone_init']` callable
+  overrides the ImageNet load + BN-policy call at init and skips the recurring
+  BN-policy call in the per-epoch loop. Absent key is byte-identical to before;
+  confirmed the existing audit's only line reference into this file
+  (`weeddet_v6b.py:1076`) still lands before both edits.
+- Data: built `RICE_curated_phase2.zip` from the curated/grouped RICE detection
+  set (2,318 imgs: 1,799 train + 519 valid; both annotation JSONs;
+  `grouped_split.json`; `filter_decisions.csv`) — sha256 `2161e069…`, test split
+  asserted absent at build time.
+  `configs/training/detector_rice_phase2.yaml` (2-class head) +
+  `notebooks/weeddet_rice_phase2_colab.ipynb` — clone cell greps for
+  `--riceseg-backbone` to fail loudly on a stale cached clone, extract cell
+  asserts no `/test/` member in the archive, self-test + overfit-8 gate on real
+  RICE images before the full run, run manifest records the backbone sha256 for
+  traceability back to the exact phase-1 file.
+- **Verified:** full suite 158 tests + 16 subtests pass; ruff/black clean;
+  notebook JSON validated, every code cell parses, greped for stray test-split
+  refs (none). Checked git/LFS state before advising on it (nothing tracked).
+- Merged + pushed: `master` `e16ddaa` (backbone hookup), `master` `8cd1832`
+  (phase-2 config + notebook). `git status` clean, `origin/master` in sync as of
+  this session.
+
 ## Done this session (2026-07-23 — Phase-2 detector pipeline)
 
 - New CLI `agrinav train-detector` (`src/agrinav/training/weeddet_train.py`):
@@ -168,22 +228,26 @@ ruff check . && black --check .
       into the `2026-07-23` run entry in
       `docs/research/RICESEG_PRETRAIN_RESULTS.md` — they are marked *not
       captured* there, so the run currently lacks full provenance.
-- [ ] **Phase-2b data decision — `rice-weed-seg` (2,579 imgs).** The two fresh
-      Roboflow exports (`.coco` and `.coco-segmentation`) are **byte-equivalent
-      in content** (same images, same per-image ann counts, polygon areas within
-      0.02%) — use the `.coco` one, the other is a 936 MB duplicate. **Do not
-      train on Roboflow's split:** filenames are video sequences and all 4
-      families span train/valid/test (13/502 valid and 11/256 test images have
-      the literally adjacent frame in train). A curated, grouped, class-remapped
-      version already exists locally at
-      `Downloads/agrinav_intake_2026-07-21/deliverable/detection/RICE/`
-      (`grouped_split.json`, 40-frame blocks, `rice_protect`/`weed_target`,
-      `filter_decisions.csv`) — prefer it. Note it is **2-class**, vs the
-      3-class RiceSEG head; merging needs a documented class-map decision.
+- [x] ~~Phase-2b data decision — `rice-weed-seg` (2,579 imgs)~~ — **DECIDED
+      2026-07-27**: use the curated/grouped RICE set (2,318 imgs after filtering),
+      not either Roboflow export and not Roboflow's leaky native split. Packaged
+      as `RICE_curated_phase2.zip`; config + notebook built. Still 2-class
+      (`rice_protect`/`weed_target`) vs the 3-class RiceSEG segmentation head —
+      no merge attempted, they're separate tasks (detector vs. segmentation).
+- [ ] **User: upload `RICE_curated_phase2.zip`** (932 MB, at
+      `C:\Users\Benny Merr\Downloads\`) to `MyDrive/agrinav_data/rice_phase2/`,
+      then run `notebooks/weeddet_rice_phase2_colab.ipynb` (Runtime → GPU → Run
+      all). This is the first real phase-2 training run, optionally warm-started
+      from the phase-1 backbone via `--riceseg-backbone`.
+- [ ] **Paste the phase-2 run manifest** into
+      `docs/research/` (or wherever the phase-2 results log lands) once the
+      Colab run finishes — `run_manifest.json` in the checkpoint dir already
+      captures backbone sha256 + git commit.
 - [ ] **Run the Colab GPU notebook** `notebooks/weeddet_detector_colab.ipynb` for
-      the first real detector convergence + qualitative-val pass. Needs
-      `RiceSEG.zip` in `MyDrive/agrinav_data/` and the `detector_v1/split_v1` json
-      (run `detector_data_prep_colab.ipynb` first if absent).
+      the first real detector convergence + qualitative-val pass on RiceSEG data
+      (separate from the RICE phase-2 notebook above). Needs `RiceSEG.zip` in
+      `MyDrive/agrinav_data/` and the `detector_v1/split_v1` json (run
+      `detector_data_prep_colab.ipynb` first if absent).
 - [ ] **For a defensible mAP (deferred Gate-4 remainder):** COCO AP evaluator +
       one canonical decode/postprocess (P1-6) + perf P1-4 (anchor count) /
       P1-5 (`batched_nms`). The current pipeline is exploratory until these land.
@@ -191,6 +255,11 @@ ruff check . && black --check .
       launch it).
 - [ ] **Delete stray `~` dir** at `Downloads/agrinav_full/~` (outside the repo;
       Claude-tooling cruft) — needs confirmation before removal.
+- [ ] **Stale Drive `code_snapshot_2783b8e/` folder** has only `pyproject.toml`,
+      `__init__.py` files, and 3 configs — the large `.py` modules never
+      transferred, and it's now several commits behind `master`. Recommend
+      deleting it rather than risk running stale code from Drive; the Colab
+      notebooks clone `master` fresh instead, which is the supported path.
 
 ## Deferred / backlog (documented in ADR 0002)
 
