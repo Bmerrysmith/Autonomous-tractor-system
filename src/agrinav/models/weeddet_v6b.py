@@ -1437,11 +1437,22 @@ def train_with_progress(config):
 
     # v6 (F1/F2): pretrained backbone, then BN policy — BEFORE optimizer
     # creation so requires_grad filtering sees the final flags.
-    if config.get('pretrained_backbone', True):
-        load_imagenet_backbone(model)
-    apply_bn_policy(model,
-                    pretrained_loaded=config.get('pretrained_backbone', True),
-                    verbose=True)
+    #
+    # Phase-2 seam: an optional config['backbone_init'] callable injects an
+    # in-domain backbone (e.g. the RiceSEG-pretrained weights) in place of
+    # ImageNet. It owns its own fail-closed key/shape check, and apply_bn_policy
+    # is deliberately skipped for it — the loaded BN running stats are in-domain
+    # and must stay trainable (see load_riceseg_backbone: "never apply_bn_policy").
+    # When the key is absent the else branch is byte-identical to the original.
+    backbone_init = config.get('backbone_init')
+    if backbone_init is not None:
+        backbone_init(model)
+    else:
+        if config.get('pretrained_backbone', True):
+            load_imagenet_backbone(model)
+        apply_bn_policy(model,
+                        pretrained_loaded=config.get('pretrained_backbone', True),
+                        verbose=True)
 
     img_size   = config.get('img_size', 512)
     train_ds = (config['train_dataset'] if config.get('train_dataset') is not None
@@ -1487,8 +1498,12 @@ def train_with_progress(config):
 
     for epoch in epoch_bar:
         model.train()
-        apply_bn_policy(model,
-                        pretrained_loaded=config.get('pretrained_backbone', True))
+        # See the init seam above: an injected in-domain backbone keeps BN
+        # trainable, so skip the per-epoch ImageNet BN re-freeze for it. Absent
+        # key -> identical to the original per-epoch apply_bn_policy call.
+        if config.get('backbone_init') is None:
+            apply_bn_policy(model,
+                            pretrained_loaded=config.get('pretrained_backbone', True))
 
         epoch_loss, n_batches = 0.0, 0
 

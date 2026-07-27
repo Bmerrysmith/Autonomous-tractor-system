@@ -22,6 +22,7 @@ from agrinav.models import weeddet_v6b as wd
 from agrinav.training.weeddet_train import (
     DEFAULT_CLASS_NAMES,
     _CocoSplitDataset,
+    _make_riceseg_backbone_init,
     build_config,
     load_checkpoint_model,
     main,
@@ -194,3 +195,175 @@ def test_injected_dataset_drives_train_with_progress(tmp_path):
         loaded, os.path.join(images_root, "img0.jpg"), img_size=64, score_thr=0.0
     )
     assert boxes.shape[0] == scores.shape[0] == labels.shape[0]
+
+
+# ================================================================ backbone seam
+def _riceseg_style_backbone(tmp_path, num_classes=3, corrupt=False, drop=False):
+    """Export a WeedDet's own backbone tensors, the way riceseg_pretrain does.
+
+    Round-tripping the model's real keys is what makes this a meaningful test of
+    the fail-closed contract: `drop` removes a tensor and `corrupt` reshapes one,
+    which are exactly the two failure modes load_riceseg_backbone must reject.
+    """
+    model = wd.WeedDet(num_classes=num_classes)
+    sd = {k: v.cpu() for k, v in model.state_dict().items() if k.startswith("backbone.")}
+    if drop:
+        del sd[sorted(sd)[0]]
+    if corrupt:
+        k = sorted(sd)[0]
+        sd[k] = torch.zeros(1)
+    path = str(tmp_path / f"bk_{'bad' if (corrupt or drop) else 'ok'}.pth")
+    torch.save(sd, path)
+    return path
+
+
+def test_riceseg_backbone_init_loads_and_is_picklable(tmp_path):
+    """The init callable must load real weights AND survive the checkpoint pickle."""
+    ckpt = _riceseg_style_backbone(tmp_path)
+    init = _make_riceseg_backbone_init(ckpt)
+
+    model = wd.WeedDet(num_classes=3)
+    n_loaded = init(model)
+    assert n_loaded > 0
+
+    # train_with_progress pickles the whole config into every checkpoint.
+    restored = pickle.loads(pickle.dumps(init))
+    assert restored.ckpt_path == init.ckpt_path
+    restored(wd.WeedDet(num_classes=3))  # still usable after the round-trip
+
+
+def test_riceseg_backbone_missing_path_fails_before_training(tmp_path):
+    with pytest.raises(FileNotFoundError, match="riceseg-backbone checkpoint not found"):
+        _make_riceseg_backbone_init(str(tmp_path / "nope.pth"))
+
+
+@pytest.mark.parametrize("kind", ["drop", "corrupt"])
+def test_riceseg_backbone_partial_or_mismatched_load_raises(tmp_path, kind):
+    """Fails closed: never silently train from a mostly-random backbone."""
+    ckpt = _riceseg_style_backbone(tmp_path, drop=(kind == "drop"), corrupt=(kind == "corrupt"))
+    init = _make_riceseg_backbone_init(ckpt)
+    with pytest.raises(ValueError, match="riceseg load is incomplete"):
+        init(wd.WeedDet(num_classes=3))
+
+
+def test_build_config_wires_backbone_init_and_disables_imagenet(tmp_path):
+    ann_file, images_root = _write_synthetic_split(str(tmp_path))
+    ckpt = _riceseg_style_backbone(tmp_path)
+    args = argparse.Namespace(
+        ann_file=ann_file,
+        images_root=images_root,
+        config=None,
+        no_pretrained_backbone=False,
+        riceseg_backbone=ckpt,
+    )
+    cfg = build_config(args)
+    assert callable(cfg["backbone_init"])
+    # ImageNet must be recorded off so the saved config is unambiguous.
+    assert cfg["pretrained_backbone"] is False
+
+
+def test_build_config_without_riceseg_backbone_has_no_seam(tmp_path):
+    """Absent flag -> no backbone_init key, so the monolith path is unchanged."""
+    ann_file, images_root = _write_synthetic_split(str(tmp_path))
+    args = argparse.Namespace(
+        ann_file=ann_file, images_root=images_root, config=None, no_pretrained_backbone=True
+    )
+    cfg = build_config(args)
+    assert cfg.get("backbone_init") is None
+
+
+@pytest.mark.integration
+def test_injected_backbone_drives_training_and_keeps_bn_trainable(tmp_path):
+    """End-to-end: the seam loads the backbone and leaves BN trainable.
+
+    apply_bn_policy would freeze the ImageNet-prefixed BN layers; the RiceSEG
+    stats are in-domain, so load_riceseg_backbone documents that it must NOT be
+    applied. Assert no backbone BN got frozen.
+    """
+    ann_file, images_root = _write_synthetic_split(str(tmp_path))
+    dataset = _CocoSplitDataset(
+        ann_file, images_root, DEFAULT_CLASS_NAMES, img_size=64, augment=False
+    )
+    ckpt = _riceseg_style_backbone(tmp_path)
+    ckpt_dir = str(tmp_path / "ckpt_bk")
+    config = {
+        "device": "cpu",
+        "seed": 0,
+        "num_classes": 3,
+        "backbone_init": _make_riceseg_backbone_init(ckpt),
+        "img_size": 64,
+        "batch_size": 2,
+        "num_workers": 0,
+        "base_lr": 0.01,
+        "num_epochs": 1,
+        "save_every": 99,
+        "repeat_factor": 1,
+        "use_amp": False,
+        "use_ema": False,
+        "grad_clip": 0.5,
+        "checkpoint_dir": ckpt_dir,
+        "train_dataset": dataset,
+    }
+
+    model = wd.train_with_progress(config)
+    assert model is not None
+    assert os.path.isfile(os.path.join(ckpt_dir, "weeddet_best.pth"))
+
+    frozen = [
+        name
+        for name, m in model.named_modules()
+        if name.startswith("backbone.")
+        and isinstance(m, torch.nn.BatchNorm2d)
+        and not any(p.requires_grad for p in m.parameters())
+    ]
+    assert not frozen, f"backbone BN must stay trainable for a RiceSEG init; frozen={frozen[:4]}"
+
+
+@pytest.mark.integration
+def test_backbone_seam_toggles_apply_bn_policy_exactly(tmp_path, monkeypatch):
+    """The seam's contract, asserted directly rather than inferred.
+
+    Absent ``backbone_init`` -> the original ImageNet/BN path still runs
+    (apply_bn_policy called at init AND once per epoch). Present -> skipped
+    entirely, because the in-domain BN stats must stay trainable.
+    """
+    ann_file, images_root = _write_synthetic_split(str(tmp_path))
+    dataset = _CocoSplitDataset(
+        ann_file, images_root, DEFAULT_CLASS_NAMES, img_size=64, augment=False
+    )
+    base = {
+        "device": "cpu",
+        "seed": 0,
+        "num_classes": 3,
+        "pretrained_backbone": False,  # offline: no ImageNet fetch
+        "img_size": 64,
+        "batch_size": 2,
+        "num_workers": 0,
+        "base_lr": 0.01,
+        "num_epochs": 2,  # >1 so the per-epoch call site is exercised
+        "save_every": 99,
+        "repeat_factor": 1,
+        "use_amp": False,
+        "use_ema": False,
+        "grad_clip": 0.5,
+        "train_dataset": dataset,
+    }
+
+    calls = []
+    real = wd.apply_bn_policy
+    monkeypatch.setattr(wd, "apply_bn_policy", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+
+    wd.train_with_progress({**base, "checkpoint_dir": str(tmp_path / "a")})
+    without_seam = len(calls)
+    assert without_seam >= 3, "original path must call apply_bn_policy at init + each epoch"
+
+    calls.clear()
+    ckpt = _riceseg_style_backbone(tmp_path)
+    wd.train_with_progress(
+        {
+            **base,
+            "checkpoint_dir": str(tmp_path / "b"),
+            "backbone_init": _make_riceseg_backbone_init(ckpt),
+        }
+    )
+    assert calls == [], "an injected in-domain backbone must never be BN-frozen"

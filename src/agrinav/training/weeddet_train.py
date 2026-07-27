@@ -77,6 +77,7 @@ _HARD_DEFAULTS: dict[str, Any] = {
     "lsc_k": 7,
     "use_atss": True,
     "pretrained_backbone": True,
+    "riceseg_backbone": None,  # path to a RiceSEG backbone .pth; overrides ImageNet
     "img_size": 512,
     "batch_size": 4,
     "num_workers": 2,
@@ -106,6 +107,7 @@ _CLI_TO_CONFIG: dict[str, str] = {
     "ann_file": "ann_file",
     "images_root": "images_root",
     "class_names": "class_names",
+    "riceseg_backbone": "riceseg_backbone",
     "img_size": "img_size",
     "batch_size": "batch_size",
     "epochs": "num_epochs",
@@ -276,12 +278,60 @@ def _resolve_pretrained(cfg: dict[str, Any], args: argparse.Namespace) -> bool:
     return bool(cfg.get("pretrained_backbone", True))
 
 
+class _RicesegBackboneInit:
+    """Picklable ``backbone_init`` callable: load a RiceSEG backbone into WeedDet.
+
+    A plain closure would be simpler but the whole config is pickled into every
+    checkpoint by ``train_with_progress``; a module-level class survives that
+    round-trip. Only the checkpoint *path* is stored, so the pickle stays tiny.
+
+    Delegates to :func:`agrinav.training.riceseg_pretrain.load_riceseg_backbone`,
+    which fails closed: every expected ``backbone.*`` tensor must be present with
+    a matching shape or it raises rather than silently training from a mostly
+    random backbone (deep audit 2026-07-20 §9.4).
+
+    BN is deliberately left trainable — the loaded running stats are in-domain,
+    and ``apply_bn_policy`` (which freezes BN where ImageNet stats exist) must not
+    be applied on top. The monolith's seam skips it whenever this is injected.
+    """
+
+    def __init__(self, ckpt_path: str) -> None:
+        self.ckpt_path = os.fspath(ckpt_path)
+
+    def __call__(self, model: Any) -> int:
+        from agrinav.training.riceseg_pretrain import load_riceseg_backbone
+
+        n = load_riceseg_backbone(model, self.ckpt_path, verbose=True)
+        print(
+            f"[backbone] RiceSEG init from {self.ckpt_path} "
+            "(ImageNet skipped; BN left trainable)"
+        )
+        return n
+
+    def __repr__(self) -> str:  # keeps the saved config readable
+        return f"{type(self).__name__}({self.ckpt_path!r})"
+
+
+def _make_riceseg_backbone_init(ckpt_path: str) -> _RicesegBackboneInit:
+    """Validate the checkpoint path now, so a typo fails before training starts."""
+    path = os.fspath(ckpt_path)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"--riceseg-backbone checkpoint not found: {path!r}. Pass the backbone "
+            "exported by `agrinav pretrain` (e.g. .../out/riceseg_backbone.pth), or "
+            "omit the flag to warm-start from ImageNet instead."
+        )
+    return _RicesegBackboneInit(path)
+
+
 def build_config(args: argparse.Namespace) -> dict[str, Any]:
     """Assemble the ``train_with_progress`` config for a full training run.
 
     Merge order (last wins): hard defaults < ``--config`` YAML < explicit CLI flags.
     ``num_classes`` is derived from ``class_names`` and the injected
-    ``train_dataset`` is a :class:`_CocoSplitDataset` over ``--ann-file``.
+    ``train_dataset`` is a :class:`_CocoSplitDataset` over ``--ann-file``. When
+    ``riceseg_backbone`` is set, a picklable ``backbone_init`` callable is added
+    so ``train_with_progress`` loads that in-domain backbone in place of ImageNet.
     """
     _require_data_args(args)
     cfg: dict[str, Any] = dict(_HARD_DEFAULTS)
@@ -296,6 +346,13 @@ def build_config(args: argparse.Namespace) -> dict[str, Any]:
     cfg["pretrained_backbone"] = _resolve_pretrained(cfg, args)
     if cfg.get("use_amp") is None:
         cfg["use_amp"] = torch.cuda.is_available()
+
+    if cfg.get("riceseg_backbone"):
+        cfg["backbone_init"] = _make_riceseg_backbone_init(cfg["riceseg_backbone"])
+        # The injected loader replaces ImageNet; the monolith's backbone seam
+        # ignores pretrained_backbone when backbone_init is present, but record
+        # it False so the saved config is unambiguous.
+        cfg["pretrained_backbone"] = False
 
     cfg["train_dataset"] = _CocoSplitDataset(
         cfg["ann_file"],
@@ -576,6 +633,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-pretrained-backbone",
         action="store_true",
         help="skip the ImageNet warm-start (required offline / on CPU)",
+    )
+    parser.add_argument(
+        "--riceseg-backbone",
+        default=None,
+        metavar="PATH",
+        help=(
+            "warm-start from a RiceSEG-pretrained backbone (from `agrinav pretrain`) "
+            "instead of ImageNet; fails closed on a partial/mismatched load"
+        ),
     )
     parser.add_argument(
         "--device", default=None, help="cuda or cpu (default: cuda if available, else cpu)"
