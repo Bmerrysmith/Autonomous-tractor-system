@@ -17,6 +17,81 @@ It is intentionally short: a *pointer*, not a log. Detailed history lives in git
 
 ---
 
+## Current status — 2026-07-29
+
+**Go/no-go now lives in one file: `docs/GATE_STATUS.md`.** This file stays the
+narrative log; that file is the standing verdict. They used to disagree —
+`START_HERE.md` said "do not train the detector yet" while the entry below
+reported four completed runs.
+
+**The two 2026-07-28 phase-2 runs are VOID for evaluation.** Independent
+verification of the two 2026-07-29 audits (full record:
+`docs/audits/2026-07-29/AUDIT_VERIFICATION_2026-07-29.md`) reproduced their data
+findings exactly and then established two things the audits missed:
+
+1. **`RICE_curated_phase2.zip` was never the grouped split.** It is the *native*
+   Roboflow split with the folder named `test/` deleted; `grouped_split.json` was
+   never applied. That single mistake put **231 of the 261 intended sealed-test
+   images (88.5%) into train/valid** — and *also* left **233 intended train/valid
+   images out** of the archive entirely, because they sat in the deleted folder.
+   The archive could not be repaired by re-sorting its own contents.
+2. **Both runs were produced at `06c95e0`**, i.e. before the val loader existed —
+   their `run_manifest.json` says so, and neither run directory contains
+   `status.json`, `metrics.jsonl`, or `weeddet_last.pth`. So `weeddet_best.pth` in
+   both is the **lowest-training-loss** epoch, on contaminated data. Each Drive run
+   directory now carries a `VOID.md` and a `run_manifest.CORRECTED.json`; the
+   original manifests' claim that the "test split [was] sealed and absent from the
+   archive" was false and is corrected there. **The checkpoints were kept** — they
+   are still valid engineering evidence for the `save_every` finding below.
+
+The intended 261-image test split is **burned**. A replacement must be drawn from
+images never trained on; `manifests/split_membership.json` in the rebuilt dataset
+carries a `trained_on_legacy` flag and a re-derived `group_id` per image for
+exactly that purpose.
+
+### Landed this session (`feat/training-observability`, pushed)
+
+- **`agrinav data-build-rice-phase2`** (`src/agrinav/data/build_rice_phase2.py`,
+  35 tests) — `build` / `preflight` / `package`. Rebuilds from
+  `agrinav_intake_2026-07-21/deliverable/detection/RICE/` by *applying*
+  `grouped_split.json`: 1,800 / 518 / 261 images and 59,691 / 15,226 / 6,284 boxes,
+  reconciled against the manifest's own `per_split` totals. EXIF orientation
+  applied and stripped (214 of 2,579 images; only those re-encoded, everything else
+  byte-identical to source). SHA256 per image and per emitted JSON. One documented
+  box rule — clip a <=1 px excursion, reject anything worse — with an itemized
+  rejection report (3 rejected, 115 clipped). The unreviewed SAM polygons are
+  dropped by default. `preflight` re-verifies the tree from disk and fails closed;
+  the split manifest is vendored into the output so an archive can be verified
+  without the build machine's paths.
+- **Notebook is fail-closed and pinned.** Cells 6/8/10/12/14 no longer use
+  `get_ipython().system(...)` — a failed install, self-test, or overfit gate now
+  stops the notebook. The checkout is pinned to a commit (a mutable `master` is how
+  the voided runs silently got train-loss selection), and it asserts the required
+  trainer flags exist before running. Extraction validates
+  `PurePosixPath(member).parts` — rejecting absolute paths, `..`, and any `test`
+  path component — instead of substring-matching `'/test/'`, and then runs the
+  dataset preflight. Detached launch is verified by liveness. The run manifest now
+  records the archive SHA256, per-annotation-file SHA256s, the config SHA256, the
+  dataset provenance block, and the resolved commit.
+- **`docs/GATE_STATUS.md`** — single authoritative gate file; `START_HERE.md` and
+  `README.md` now link to it instead of restating verdicts.
+- Corrected `START_HERE.md`'s conflation of the RiceSEG-derived dataset card with
+  the curated-RICE phase-2 dataset. They are different datasets.
+
+### Deliberately not done
+
+- **A replacement test split.** `grouped_split.json` records `num_groups: 68` and
+  `block_size: 40` but **not** per-file group ids, so the original grouping cannot
+  be reproduced from it. `derive_group_id()` is an explicit *re-derivation* and is
+  labelled as such; choosing the grouping rule for a new test split is a decision
+  that belongs in an ADR, not in a silent default.
+- **Class-aware decode, the model-to-COCO adapter, AP-based selection.** Still the
+  blocking work for any quotable number. See `docs/GATE_STATUS.md`.
+
+Measured residual, worth remembering: 3 re-derived capture-family/frame-block
+groups straddle a split boundary in the *intended* grouped split, because 40-frame
+blocks cut video sequences. Small, but "leakage-free" is the wrong word for it.
+
 ## Current status — 2026-07-28
 
 **Phase-2 detector training RAN, and it completed — four times.** The runs that

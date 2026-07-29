@@ -14,6 +14,7 @@
 
 ## Start here
 
+0. `docs/GATE_STATUS.md` — **the authoritative go/no-go verdict.** Read it before spending GPU time
 1. `docs/audits/2026-07-20/AGRINAV_FULL_DEEP_AUDIT_2026-07-20.md` — authoritative recovery and correctness audit
 2. `docs/audits/2026-07-20/AGRINAV_DEPLOYMENT_ROADMAP_2026-07-20.md` — gated roadmap from research to deployment
 3. `active/ACTIVE_NOTES.md` — current priorities and stop conditions
@@ -95,15 +96,22 @@ agrinav_full/
     └── voc_era/                       ← VOC-era data scripts (coco_to_voc, step1/2)
 ```
 
-## Quick status (2026-07-20)
+## Quick status (2026-07-29)
+
+**Go/no-go decisions live in one file: [`docs/GATE_STATUS.md`](docs/GATE_STATUS.md).**
+This table summarizes; that file governs. Session narrative is in
+[`docs/HANDOFF.md`](docs/HANDOFF.md).
 
 | Item | Status |
 |---|---|
-| Historical detector result | T7 recorded val AP@50 0.1040 / AP@75 0.0116; not a deployable result or a defensible causal estimate under the July 20 audit |
-| Blocking correctness issues | Translation augmentation direction, split leakage, assignment semantics, mixed evaluator protocols, and incompatible inference |
+| Phase 1 (RiceSEG segmentation pretraining) | Closed. Best mIoU 0.5827 @ ep30, reproduced within 0.001; backbone exported |
+| Phase 2 (detector) pipeline | Runs end to end: 18/18 epochs on an A100 in ~24 min, with `status.json` / `metrics.jsonl` / atomic checkpoints |
+| Phase 2 evaluation path | **Missing.** Selection is validation *loss*; multiclass decode is class-agnostic; no model-to-COCO adapter. No AP number is defensible yet |
+| 2026-07-28 detector runs | **Voided** — trained on a contaminated archive with training-loss selection. See the `VOID.md` files in their Drive run directories |
+| Dataset of record | Rebuilt 2026-07-29 from the source deliverable: 1,800 / 518 / 261 images, 81,201 boxes, EXIF-normalized, hashed, preflight-verified (`agrinav data-build-rice-phase2`) |
+| Test split | The manifest's 261-image test split is **burned** (231 of it was trained on). A replacement must come from the never-trained-on pool |
+| Historical detector result | T7 recorded val AP@50 0.1040 / AP@75 0.0116; not a deployable result or a defensible causal estimate |
 | Safety | Historical spray-by-default inference is disabled; no actuation interface is present or approved |
-| Curated data | 245 RiceSEG-derived images remain local-only; Git carries the manifest/audit, not bulk image binaries |
-| Next engineering gate | Fix correctness with synthetic tests, rebuild source-grouped splits, then establish maintained baselines before more tuning |
 | License | No project-wide code license has been selected; do not assume permission beyond explicitly attributed third-party material |
 
 ## Historical experiment pipeline
