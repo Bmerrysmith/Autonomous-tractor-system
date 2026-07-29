@@ -45,8 +45,10 @@ Single-class rice config (AgriNav):
     Detection logic INVERTED: rice = protected, everything else = spray target
 """
 
+import json
 import math
 import os
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -1417,6 +1419,133 @@ class WarmupMultiStepLR:
     def warmup_done(self):
         return self._iter >= self.warmup_iters
 
+    def state_dict(self):
+        return {'iter': self._iter, 'base_lrs': list(self._base_lrs)}
+
+    def load_state_dict(self, state):
+        self._iter = int(state.get('iter', 0))
+        base = state.get('base_lrs')
+        if base:
+            self._base_lrs = list(base)
+
+
+# --- checkpoint / metrics plumbing -----------------------------------------
+# Everything below exists because a training run's *artifacts* were previously
+# unusable off the training machine and a completed run was indistinguishable
+# from a crashed one. See docs/HANDOFF.md.
+
+_CONFIG_DROP_KEYS = ('train_dataset', 'val_dataset', 'backbone_init')
+
+
+def sanitize_config_for_save(config):
+    """Return a JSON-safe copy of ``config`` for embedding in a checkpoint.
+
+    Live objects (the injected datasets, the ``backbone_init`` callable) are
+    replaced by a ``repr``-style provenance string instead of being pickled.
+    Pickling them made every checkpoint depend on importable project internals:
+    because training runs as ``python -m agrinav.training.weeddet_train``, the
+    ``_RicesegBackboneInit`` class pickled with ``__module__ == '__main__'`` and
+    loading the checkpoint in any other process raised
+    ``AttributeError: Can't get attribute '_RicesegBackboneInit'``.
+    """
+    safe = {}
+    for key, value in config.items():
+        if key in _CONFIG_DROP_KEYS:
+            if value is not None:
+                safe[f'{key}_repr'] = repr(value)
+                ann = getattr(value, 'ann_file', None)
+                if ann is not None:
+                    safe[f'{key}_ann_file'] = str(ann)
+                ckpt = getattr(value, 'ckpt_path', None)
+                if ckpt is not None:
+                    safe[f'{key}_ckpt_path'] = str(ckpt)
+            continue
+        if isinstance(value, (str, int, float, bool, type(None))):
+            safe[key] = value
+        elif isinstance(value, (list, tuple)):
+            safe[key] = [v for v in value
+                         if isinstance(v, (str, int, float, bool, type(None)))]
+        elif isinstance(value, dict):
+            safe[key] = {str(k): v for k, v in value.items()
+                         if isinstance(v, (str, int, float, bool, type(None)))}
+        else:
+            safe[f'{key}_repr'] = repr(value)
+    return safe
+
+
+def atomic_torch_save(obj, path):
+    """``torch.save`` via a temp file in the same directory, then ``os.replace``.
+
+    Checkpoints are written straight onto a Google Drive FUSE mount; an
+    interrupted in-place write previously truncated the only good checkpoint.
+    ``os.replace`` is atomic within a filesystem, so the old file survives until
+    the new one is complete.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    tmp = f'{path}.tmp'
+    try:
+        torch.save(obj, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
+
+
+def append_metrics_row(ckpt_dir, row):
+    """Append one JSON object to ``<ckpt_dir>/metrics.jsonl`` and flush to disk.
+
+    The per-epoch loss curve previously existed only in a notebook cell; Colab
+    truncates long cell output, which destroyed the early epochs of a completed
+    run. Flushing + fsync per epoch means a killed run still leaves every epoch
+    it finished.
+    """
+    path = os.path.join(ckpt_dir, 'metrics.jsonl')
+    with open(path, 'a', encoding='utf-8') as handle:
+        handle.write(json.dumps(row, sort_keys=True) + '\n')
+        handle.flush()
+        os.fsync(handle.fileno())
+    return path
+
+
+@torch.no_grad()
+def evaluate_val_loss(model, loader, device):
+    """Mean loss over ``loader`` in eval mode. Returns ``{}`` for an empty loader.
+
+    Calls ``_get_logits`` + ``model.criterion`` directly rather than
+    ``model(images, targets)``, because ``forward`` returns decoded detections
+    whenever ``model.training`` is False. Running under ``eval()`` means BN uses
+    its running statistics and — critically — does not *update* them from
+    validation data.
+    """
+    was_training = model.training
+    model.eval()
+    totals, batches = {}, 0
+    try:
+        for imgs, tgts in loader:
+            if not isinstance(imgs, torch.Tensor) or imgs.numel() == 0:
+                continue
+            imgs = imgs.to(device)
+            tgts = [{k: v.to(device) if torch.is_tensor(v) else v
+                     for k, v in t.items()} for t in tgts]
+            cls_logits, regs, anchors, _ = model._get_logits(imgs)
+            losses = model.criterion(
+                cls_logits, regs, anchors, tgts,
+                getattr(model.anchor_gen, 'num_anchors_per_level', None))
+            for key, value in losses.items():
+                totals[key] = totals.get(key, 0.0) + float(value.item())
+            batches += 1
+    finally:
+        if was_training:
+            model.train()
+    if batches == 0:
+        return {}
+    return {k: v / batches for k, v in totals.items()}
+
 
 def train_with_progress(config):
     """Training loop with tqdm progress bars — preferred for Colab/Kaggle."""
@@ -1444,15 +1573,35 @@ def train_with_progress(config):
     # is deliberately skipped for it — the loaded BN running stats are in-domain
     # and must stay trainable (see load_riceseg_backbone: "never apply_bn_policy").
     # When the key is absent the else branch is byte-identical to the original.
+    #
+    # `bn_policy` makes the BN treatment an explicit, recordable factor instead
+    # of a side effect of which backbone was chosen. 'auto' reproduces the
+    # historical behaviour exactly: freeze BN where ImageNet stats exist, leave
+    # it trainable for an injected in-domain backbone. That coupling meant the
+    # ImageNet-vs-RiceSEG A/B varied *two* factors at once (backbone weights AND
+    # BN trainability), so a delta could not be attributed. Set 'trainable' on
+    # the ImageNet arm for a matched single-factor comparison.
     backbone_init = config.get('backbone_init')
+    bn_policy = config.get('bn_policy', 'auto')
+    if bn_policy not in ('auto', 'freeze_pretrained', 'trainable'):
+        raise ValueError(
+            f"bn_policy must be 'auto', 'freeze_pretrained' or 'trainable', "
+            f"got {bn_policy!r}")
+    if bn_policy == 'auto':
+        bn_freeze = backbone_init is None
+    else:
+        bn_freeze = bn_policy == 'freeze_pretrained'
+    config['bn_policy_resolved'] = 'freeze_pretrained' if bn_freeze else 'trainable'
+
     if backbone_init is not None:
         backbone_init(model)
-    else:
-        if config.get('pretrained_backbone', True):
-            load_imagenet_backbone(model)
+    elif config.get('pretrained_backbone', True):
+        load_imagenet_backbone(model)
+    if bn_freeze:
         apply_bn_policy(model,
                         pretrained_loaded=config.get('pretrained_backbone', True),
                         verbose=True)
+    print(f"[bn-policy] {bn_policy} -> {config['bn_policy_resolved']}")
 
     img_size   = config.get('img_size', 512)
     train_ds = (config['train_dataset'] if config.get('train_dataset') is not None
@@ -1486,51 +1635,112 @@ def train_with_progress(config):
         warmup_factor=config.get('warmup_factor', 0.001))
 
     use_amp = config.get('use_amp', torch.cuda.is_available())
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    # torch.cuda.amp.* is deprecated from torch 2.4; the device-qualified API
+    # is the supported spelling and stops the FutureWarning pair from being
+    # printed into every run's log.
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     ema = ModelEMA(model, decay=config.get('ema_decay', 0.999)) if config.get('use_ema', True) else None
 
     ckpt_dir   = config.get('checkpoint_dir', 'checkpoints')
     os.makedirs(ckpt_dir, exist_ok=True)
     best_loss  = float('inf')
 
-    epoch_bar = (tqdm(range(1, num_epochs + 1), desc='Epochs')
-                 if TQDM_AVAILABLE else range(1, num_epochs + 1))
+    # Optional held-out validation. When a val dataset is injected, the epoch
+    # metric that selects `best` is the val loss of *the network that actually
+    # gets saved* (the EMA when EMA is on). Without this the selection number
+    # came from the raw online model in train() mode on augmented data while the
+    # saved weights were the EMA — the metric never scored the artifact.
+    val_ds = config.get('val_dataset')
+    val_loader = None
+    if val_ds is not None:
+        val_loader = DataLoader(
+            val_ds, batch_size=config.get('val_batch_size', config.get('batch_size', 2)),
+            shuffle=False, collate_fn=collate_fn,
+            num_workers=config.get('num_workers', 2), pin_memory=True)
+        print(f"Val  : {len(val_ds)} images | {len(val_loader)} batches")
+    select_metric = 'val/total_loss' if val_loader is not None else 'train/total_loss'
+    print(f"Checkpoint selection metric: {select_metric}")
+
+    # tqdm floods the notebook otherwise: 225 batches x 18 epochs x a forced
+    # redraw per batch produced ~424k-496k characters in one Colab cell, which
+    # made the notebook unscrollable and got the early epochs truncated away.
+    bar_interval = float(config.get('progress_interval', 2.0))
+    show_bars = TQDM_AVAILABLE and not config.get('no_progress', False)
+
+    def _log(message):
+        """Epoch summaries must not interleave with the bar's stderr writes."""
+        if show_bars:
+            tqdm.write(message)
+        else:
+            print(message, flush=True)
+
+    saved_config = sanitize_config_for_save(config)
+    history = []
+    best_epoch = 0
+    global_step = 0
+    skipped_batches = 0
+    amp_skipped_steps = 0
+    completed_epochs = 0
+
+    epoch_bar = (tqdm(range(1, num_epochs + 1), desc='Epochs', mininterval=bar_interval)
+                 if show_bars else range(1, num_epochs + 1))
 
     for epoch in epoch_bar:
         model.train()
-        # See the init seam above: an injected in-domain backbone keeps BN
-        # trainable, so skip the per-epoch ImageNet BN re-freeze for it. Absent
-        # key -> identical to the original per-epoch apply_bn_policy call.
-        if config.get('backbone_init') is None:
+        # model.train() re-enables train mode on every BN, so the freeze has to
+        # be re-applied each epoch (see apply_bn_policy's docstring).
+        if bn_freeze:
             apply_bn_policy(model,
                             pretrained_loaded=config.get('pretrained_backbone', True))
 
         epoch_loss, n_batches = 0.0, 0
+        comp_totals = {}
+        epoch_started = time.time()
+        clipped_steps = 0
+        grad_clip = config.get('grad_clip', 0.5)
 
         for r in range(repeat):  # 2× dataset repeat per epoch (paper)
             batch_iter = (tqdm(enumerate(train_loader),
                                total=len(train_loader),
                                desc=f'E{epoch:02d} R{r+1}/{repeat}',
-                               leave=False)
-                          if TQDM_AVAILABLE else enumerate(train_loader))
+                               leave=False, mininterval=bar_interval)
+                          if show_bars else enumerate(train_loader))
 
             for i, (imgs, tgts) in batch_iter:
-                if not isinstance(imgs, torch.Tensor): continue
+                if not isinstance(imgs, torch.Tensor) or imgs.numel() == 0:
+                    skipped_batches += 1
+                    continue
                 imgs = imgs.to(device)
                 tgts = [{k: v.to(device) if torch.is_tensor(v) else v
                          for k, v in t.items()} for t in tgts]
 
                 optimizer.zero_grad(set_to_none=True)
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with torch.amp.autocast('cuda', enabled=use_amp):
                     losses = model(imgs, tgts)
                     loss   = losses.get('total_loss', sum(losses.values()))
 
+                # A non-finite loss makes avg_loss NaN; `NaN < best_loss` is
+                # False forever, so the run would silently burn every remaining
+                # epoch while never updating `best` again.
+                if not torch.isfinite(loss):
+                    raise RuntimeError(
+                        f"non-finite training loss at epoch {epoch}, batch {i}: "
+                        f"{ {k: float(v.detach()) for k, v in losses.items()} }. "
+                        "Lower base_lr, check the annotations for degenerate boxes, "
+                        "or disable AMP (use_amp: false) and re-run.")
+
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                               config.get('grad_clip', 0.5))
+                total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                if float(total_norm) > grad_clip:
+                    clipped_steps += 1
+                prev_scale = scaler.get_scale() if use_amp else None
                 scaler.step(optimizer)
                 scaler.update()
+                # GradScaler silently skips a step whose grads are non-finite;
+                # a run where most updates never applied otherwise looks healthy.
+                if use_amp and scaler.get_scale() < prev_scale:
+                    amp_skipped_steps += 1
                 if ema is not None:
                     ema.update(model)
                 if not warmup.warmup_done:
@@ -1540,40 +1750,122 @@ def train_with_progress(config):
 
                 epoch_loss += loss.item()
                 n_batches  += 1
+                global_step += 1
+                for key, value in losses.items():
+                    comp_totals[key] = comp_totals.get(key, 0.0) + float(value.item())
 
-                if TQDM_AVAILABLE:
+                if show_bars:
                     batch_iter.set_postfix(
                         loss=f'{loss.item():.4f}',
                         cls=f'{losses["cls_loss"].item():.4f}',
                         reg=f'{losses["reg_loss"].item():.4f}',
                         lr=f'{optimizer.param_groups[0]["lr"]:.5f}')
 
-        avg_loss = epoch_loss / max(n_batches, 1)
+        if n_batches == 0:
+            raise RuntimeError(
+                f"epoch {epoch} completed zero usable batches ({skipped_batches} "
+                "skipped). Every batch collated empty — check that images_root "
+                "resolves and that the annotations are readable.")
 
-        if TQDM_AVAILABLE:
+        avg_loss = epoch_loss / n_batches
+        components = {f'train/{k}': v / n_batches for k, v in comp_totals.items()}
+
+        # Held-out metrics, on the network that will actually be saved.
+        val_metrics = {}
+        if val_loader is not None:
+            val_raw = evaluate_val_loss(model, val_loader, device)
+            for key, value in val_raw.items():
+                val_metrics[f'val_raw/{key}'] = value
+            if ema is not None:
+                val_ema = evaluate_val_loss(ema.ema, val_loader, device)
+                for key, value in val_ema.items():
+                    val_metrics[f'val_ema/{key}'] = value
+                selected = val_ema
+            else:
+                selected = val_raw
+            for key, value in selected.items():
+                val_metrics[f'val/{key}'] = value
+
+        epoch_metric = (val_metrics.get('val/total_loss', float('inf'))
+                        if val_loader is not None else avg_loss)
+
+        row = {'epoch': epoch, 'num_epochs': num_epochs,
+               'train/total_loss': avg_loss, 'n_batches': n_batches,
+               'skipped_batches': skipped_batches,
+               'clipped_steps': clipped_steps, 'amp_skipped_steps': amp_skipped_steps,
+               'lr': optimizer.param_groups[0]['lr'],
+               'wall_s': round(time.time() - epoch_started, 2),
+               'select_metric': select_metric, 'select_value': epoch_metric}
+        row.update(components)
+        row.update(val_metrics)
+        append_metrics_row(ckpt_dir, row)
+        history.append(row)
+
+        is_best = epoch_metric < best_loss
+        if is_best:
+            best_loss, best_epoch = epoch_metric, epoch
+
+        if show_bars:
             epoch_bar.set_postfix(avg_loss=f'{avg_loss:.4f}', best=f'{best_loss:.4f}')
-        print(f"\nEpoch {epoch:02d}/{num_epochs}  avg_loss={avg_loss:.4f}  "
-              f"best={best_loss:.4f}  lr={optimizer.param_groups[0]['lr']:.6f}")
+        summary = (f"Epoch {epoch:02d}/{num_epochs}  avg_loss={avg_loss:.4f}  "
+                   f"{select_metric}={epoch_metric:.4f}  best={best_loss:.4f}  "
+                   f"lr={optimizer.param_groups[0]['lr']:.6f}")
+        if 'val_raw/total_loss' in val_metrics and 'val_ema/total_loss' in val_metrics:
+            summary += (f"  [val raw={val_metrics['val_raw/total_loss']:.4f} "
+                        f"ema={val_metrics['val_ema/total_loss']:.4f}]")
+        _log(summary)
 
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        def _payload(loss_value):
+            return {'epoch': epoch, 'global_step': global_step,
+                    'state_dict': (ema.ema.state_dict() if ema is not None
+                                   else model.state_dict()),
+                    'raw_state_dict': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'scheduler': lr_scheduler.state_dict(),
+                    'warmup': warmup.state_dict(),
+                    'loss': loss_value,
+                    'best_metric_name': select_metric,
+                    'best_metric_value': best_loss,
+                    'class_names': list(config.get('class_names', [])),
+                    'num_classes': config.get('num_classes'),
+                    'config': saved_config,
+                    'scaler': scaler.state_dict() if use_amp else None}
+
+        # Always write a terminal artifact. Previously the only per-epoch files
+        # came from `epoch % save_every`, and 18 % 4 == 2 meant a *successful*
+        # 18-epoch run left `weeddet_epoch16.pth` as its newest file — identical
+        # on disk to a run killed at 16, which is exactly how four completed runs
+        # were misread as crashes.
+        atomic_torch_save(_payload(avg_loss), os.path.join(ckpt_dir, 'weeddet_last.pth'))
+
+        if is_best:
             path = os.path.join(ckpt_dir, 'weeddet_best.pth')
-            state_dict = ema.ema.state_dict() if ema is not None else model.state_dict()
-            torch.save({'epoch': epoch, 'state_dict': state_dict,
-                        'raw_state_dict': model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'loss': best_loss, 'config': config,
-                        'scaler': scaler.state_dict() if use_amp else None}, path)
-            print(f"  ★ Best checkpoint -> {path}")
+            atomic_torch_save(_payload(best_loss), path)
+            _log(f"  ★ Best checkpoint ({select_metric}={best_loss:.4f}) -> {path}")
 
         if epoch % save_every == 0:
             path = os.path.join(ckpt_dir, f'weeddet_epoch{epoch}.pth')
-            state_dict = ema.ema.state_dict() if ema is not None else model.state_dict()
-            torch.save({'epoch': epoch, 'state_dict': state_dict,
-                        'raw_state_dict': model.state_dict(),
-                        'loss': avg_loss, 'config': config,
-                        'scaler': scaler.state_dict() if use_amp else None}, path)
-            print(f"  Checkpoint saved  -> {path}")
+            atomic_torch_save(_payload(avg_loss), path)
+            _log(f"  Checkpoint saved  -> {path}")
 
-    print("\nTraining complete.")
+        completed_epochs = epoch
+
+    status = {
+        'completed': completed_epochs == num_epochs,
+        'epochs_planned': num_epochs,
+        'epochs_completed': completed_epochs,
+        'best_epoch': best_epoch,
+        'best_metric_name': select_metric,
+        'best_metric_value': best_loss,
+        'final_train_loss': history[-1]['train/total_loss'] if history else None,
+        'skipped_batches': skipped_batches,
+        'amp_skipped_steps': amp_skipped_steps,
+        'global_step': global_step,
+        'checkpoint_dir': os.path.abspath(ckpt_dir),
+    }
+    status_path = os.path.join(ckpt_dir, 'status.json')
+    with open(status_path, 'w', encoding='utf-8') as handle:
+        json.dump(status, handle, indent=2, sort_keys=True)
+    _log(f"\nTraining complete. best_epoch={best_epoch} "
+         f"({select_metric}={best_loss:.4f}) -> {status_path}")
     return model

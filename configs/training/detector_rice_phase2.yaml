@@ -45,7 +45,12 @@ base_lr: 0.001              # WeedDet default SGD LR
 momentum: 0.9
 weight_decay: 0.0001
 num_epochs: 18              # exploratory budget; adjust to available time
-save_every: 4               # periodic checkpoint every 4 epochs
+# Periodic checkpoint every N epochs. Note 18 % 4 == 2, so this never fires on
+# the final epoch -- which is why four *completed* runs looked like crashes at
+# epoch 16. The trainer now always writes weeddet_last.pth + status.json, so
+# completion is unambiguous regardless of this value; left at 4 to keep the
+# checkpoint cadence comparable with the 2026-07-27/28 runs.
+save_every: 4
 repeat_factor: 1            # 1798 train images is already a real epoch
 min_lr: 0.00001             # cosine floor
 warmup_factor: 0.001        # LR multiplier at warmup start
@@ -55,6 +60,18 @@ grad_clip: 0.5              # gradient-norm clip
 augment: true               # geometric + photometric augmentation (label-aligned)
 use_amp: true               # mixed precision on GPU
 use_ema: true               # track an EMA of weights for the saved checkpoint
+# --- validation / selection ---
+# Pass --val-ann-file and --val-images-root on the CLI to score a held-out split
+# each epoch; the val loss of the EMA weights (the ones actually saved) then
+# selects the best checkpoint. Without them, selection falls back to training
+# loss, which on this recipe moves less between the last five epochs than the
+# augmentation noise on the same quantity -- i.e. it ranks noise.
+# 'auto' keeps BN frozen where ImageNet stats exist and trainable for an
+# injected backbone. That coupling makes the ImageNet-vs-RiceSEG A/B a TWO-factor
+# change (backbone weights AND BN trainability). For a single-factor comparison,
+# run the ImageNet arm with --bn-policy trainable.
+bn_policy: auto
+progress_interval: 2.0      # seconds between tqdm redraws (was: every batch)
 ema_decay: 0.999            # EMA decay
 
 # --- outputs ---

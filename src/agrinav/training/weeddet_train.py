@@ -96,6 +96,19 @@ _HARD_DEFAULTS: dict[str, Any] = {
     "checkpoint_dir": "checkpoints/weeddet",
     "class_names": list(DEFAULT_CLASS_NAMES),
     "augment": True,
+    # Held-out validation. When both are set, the per-epoch val loss (of the
+    # EMA weights, i.e. the ones actually saved) selects the best checkpoint
+    # instead of the training loss.
+    "val_ann_file": None,
+    "val_images_root": None,
+    "val_batch_size": None,
+    # 'auto' keeps the historical coupling (freeze BN for ImageNet, trainable
+    # for an injected backbone); set explicitly to make the A/B single-factor.
+    "bn_policy": "auto",
+    # Progress-bar redraw interval, seconds. Bars previously redrew every batch
+    # and flooded the Colab cell with ~424k characters.
+    "progress_interval": 2.0,
+    "no_progress": False,
 }
 
 # Keys a YAML config may set. Unknown keys are rejected so typos fail loudly
@@ -118,6 +131,9 @@ _CLI_TO_CONFIG: dict[str, str] = {
     "repeat_factor": "repeat_factor",
     "device": "device",
     "seed": "seed",
+    "val_ann_file": "val_ann_file",
+    "val_images_root": "val_images_root",
+    "bn_policy": "bn_policy",
 }
 
 
@@ -361,6 +377,25 @@ def build_config(args: argparse.Namespace) -> dict[str, Any]:
         img_size=cfg["img_size"],
         augment=bool(cfg.get("augment", True)),
     )
+
+    val_ann, val_root = cfg.get("val_ann_file"), cfg.get("val_images_root")
+    if bool(val_ann) != bool(val_root):
+        raise ValueError(
+            "--val-ann-file and --val-images-root must be given together "
+            f"(got val_ann_file={val_ann!r}, val_images_root={val_root!r})."
+        )
+    if val_ann is not None and val_root is not None:
+        val_ann, val_root = os.fspath(val_ann), os.fspath(val_root)
+        if os.path.basename(val_ann).startswith("test"):
+            raise ValueError(
+                f"refusing to validate on {val_ann!r}: the test split is sealed and "
+                "must never drive checkpoint selection or threshold choice "
+                "(CLAUDE.md 13.3). Pass the valid split instead."
+            )
+        # augment=False: validation must score the model, not the augmentation.
+        cfg["val_dataset"] = _CocoSplitDataset(
+            val_ann, val_root, class_names, img_size=cfg["img_size"], augment=False
+        )
     return cfg
 
 
@@ -498,6 +533,25 @@ def run_overfit(args: argparse.Namespace) -> int:
 
 
 # ================================================================ inference helpers
+def _alias_legacy_pickle_names() -> None:
+    """Republish this module's picklable helpers under ``__main__``.
+
+    Training is launched as ``python -m agrinav.training.weeddet_train``, which
+    executes this module *as* ``__main__``. Any instance pickled into a
+    checkpoint therefore records ``__main__._RicesegBackboneInit`` rather than
+    the importable path. Loading such a checkpoint from a notebook, a test, or
+    the evaluation CLI fails with ``AttributeError`` because that name does not
+    exist in *their* ``__main__``. Binding the names here makes the historical
+    checkpoints loadable; new checkpoints avoid the problem entirely by not
+    pickling these objects at all (see ``sanitize_config_for_save``).
+    """
+    import __main__
+
+    for obj in (_RicesegBackboneInit, _CocoSplitDataset):
+        if not hasattr(__main__, obj.__name__):
+            setattr(__main__, obj.__name__, obj)
+
+
 def load_checkpoint_model(
     checkpoint_path: str | os.PathLike[str],
     num_classes: int | None = None,
@@ -509,19 +563,23 @@ def load_checkpoint_model(
     ``num_classes`` from the saved config when not given. Used by the Colab
     qualitative cell so the notebook redefines no model logic.
 
-    Tries ``weights_only=True`` first, but ``train_with_progress`` embeds the
-    whole training config -- including the injected ``_CocoSplitDataset`` -- in
-    every checkpoint, which the strict unpickler rejects (and torch >= 2.6 makes
-    strict the default). These are trusted self-produced artifacts, so full
-    unpickling is the fallback. Stripping the dataset from the saved config
-    lives in the frozen monolith and is deferred to the Gate-4 rewrite.
+    Checkpoints written since the config-sanitising fix load under
+    ``weights_only=True``. Older ones embedded the live training config -- the
+    ``_CocoSplitDataset`` and the ``_RicesegBackboneInit`` callable -- so they
+    need full unpickling. Worse, because training runs as
+    ``python -m agrinav.training.weeddet_train``, that module *is* ``__main__``,
+    so those classes pickled with ``__module__ == '__main__'`` and unpickling
+    them anywhere else raised ``AttributeError: Can't get attribute
+    '_RicesegBackboneInit' on <module '__main__'>``. :func:`_alias_legacy_pickle_names`
+    republishes them under ``__main__`` so the historical artifacts stay readable.
     """
     import pickle
 
     path = os.fspath(checkpoint_path)
     try:
         checkpoint = torch.load(path, map_location=device, weights_only=True)
-    except (pickle.UnpicklingError, RuntimeError):
+    except (pickle.UnpicklingError, RuntimeError, AttributeError):
+        _alias_legacy_pickle_names()
         checkpoint = torch.load(path, map_location=device, weights_only=False)
     if num_classes is None:
         num_classes = int(checkpoint.get("config", {}).get("num_classes", 1))
@@ -602,6 +660,25 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--images-root",
         help="directory joined with each record's file_name (extracted RiceSEG root)",
+    )
+    parser.add_argument(
+        "--val-ann-file",
+        default=None,
+        help="path to the VALID split COCO json; enables a per-epoch held-out "
+        "val loss that selects the best checkpoint (never test.coco.json)",
+    )
+    parser.add_argument(
+        "--val-images-root",
+        default=None,
+        help="images root for --val-ann-file (required with it)",
+    )
+    parser.add_argument(
+        "--bn-policy",
+        default=None,
+        choices=("auto", "freeze_pretrained", "trainable"),
+        help="BatchNorm treatment. 'auto' (default) freezes BN where ImageNet "
+        "stats exist and leaves it trainable for an injected backbone; set it "
+        "explicitly to keep an ImageNet-vs-RiceSEG A/B single-factor",
     )
     parser.add_argument(
         "--class-names",
