@@ -34,6 +34,7 @@ COMMANDS: dict[str, str] = {
     "data-sam-mask": "agrinav.data.sam_box_to_mask",
     "data-triage": "agrinav.data.triage_proposals",
     "data-pilot": "agrinav.data.build_annotation_pilot",
+    "data-anchor-audit": "agrinav.data.anchor_audit",
     # --- training ---
     "pretrain": "agrinav.training.riceseg_pretrain",
     "baseline-seg": "agrinav.training.baseline_seg_control",
