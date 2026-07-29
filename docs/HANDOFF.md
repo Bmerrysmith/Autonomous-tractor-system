@@ -17,6 +17,85 @@ It is intentionally short: a *pointer*, not a log. Detailed history lives in git
 
 ---
 
+## Current status — 2026-07-28
+
+**Phase-2 detector training RAN, and it completed — four times.** The runs that
+appeared to die at epoch 16 of 18 were finishing. `save_every: 4` against
+`num_epochs: 18` means `18 % 4 == 2`, so the periodic-save guard never fired on
+the final epoch and a *successful* run's newest file was always
+`weeddet_epoch16.pth` — byte-identical on disk to a run killed at 16. Confirmed
+by the 2026-07-28 A100 run, which printed `Training complete.` and
+`Epochs: 100% 18/18` after 23m48s. The epoch-index invariance across a 3x
+wall-clock spread (T4 67 min vs A100 21.6 min to epoch 16) was the tell: a time
+or resource failure truncates at a wall-clock point, not at an epoch number.
+
+Completed-run loss curve (A100, seed 42, RiceSEG warm start): ep1 4.7932 ·
+ep4 1.9529 · ep8 1.6740 · ep12 1.6050 · ep16 1.5843 · **ep17 1.5768 (best)** ·
+ep18 1.5794. LR landed exactly on `min_lr` 1e-5. Two A100 runs agreed to the
+fourth decimal at ep8/ep9, so the pipeline reproduces.
+
+**Caveat on that curve:** the flat tail is largely the cosine schedule (LR is at
+~13% of base by ep14, ~2% by ep17), not proof of convergence, and the ep15-18
+spread (0.016) is about the size of the augmentation noise on the same
+quantity — so the old "best = ep17" was ranking noise.
+
+### Landed this session (`feat/training-observability`)
+
+- **Checkpoint portability.** Every checkpoint pickled the live config —
+  the `_CocoSplitDataset` *and* the `_RicesegBackboneInit` callable. Because
+  training runs as `python -m agrinav.training.weeddet_train`, that class
+  pickled with `__module__ == '__main__'`, so loading a warm-started checkpoint
+  anywhere else raised `AttributeError: Can't get attribute
+  '_RicesegBackboneInit' on <module '__main__'>` — which is what blocked the
+  qualitative-val cell on every run. `sanitize_config_for_save` now stores
+  provenance strings instead of live objects (new checkpoints load under
+  `weights_only=True`), and `_alias_legacy_pickle_names` repairs the existing
+  ones. The claim in the 2026-07-27 entry that the module-level class "survives
+  checkpoint pickling" was wrong under `-m`.
+- **Terminal artifacts.** `weeddet_last.pth` every epoch + `status.json`
+  (`completed`, `epochs_completed`, `best_epoch`, `best_metric_*`) after the
+  loop. Completion is now unambiguous.
+- **`metrics.jsonl`**, one flushed+fsynced row per epoch with the cls/reg split,
+  LR, wall time, skipped/clipped/AMP-skipped step counts. The curve no longer
+  lives only in a Colab cell — Colab truncated one run's output and destroyed
+  epochs 1-7 permanently.
+- **Held-out validation.** `--val-ann-file` / `--val-images-root` add a per-epoch
+  eval-mode val loss via `_get_logits` + `criterion` (no canonical decode
+  needed, so it works today). Both EMA and raw are scored, and the **EMA** — the
+  network actually saved — selects `best`. Refuses a `test*` ann file.
+- **Atomic checkpoint writes** (temp + `os.replace`): a kill mid-write to the
+  Drive FUSE mount no longer destroys the previous good checkpoint.
+- **NaN/empty-epoch gates.** A non-finite loss raises instead of silently
+  freezing `best` for the rest of the run; a zero-usable-batch epoch raises
+  instead of becoming `avg_loss = 0.0`.
+- **tqdm throttled** (`progress_interval`, default 2 s) + `tqdm.write` for epoch
+  lines. One 16-epoch run had streamed ~424k characters into a single cell.
+- **`bn_policy`** (`auto`|`freeze_pretrained`|`trainable`). `auto` reproduces the
+  old behaviour exactly. It exists because the RiceSEG arm skipped
+  `apply_bn_policy` entirely while the ImageNet arm froze BN every epoch — so
+  **the advertised one-flag A/B was a two-factor change** and any delta was
+  unattributable. Run the ImageNet control with `--bn-policy trainable`.
+- **`agrinav data-anchor-audit`** — model-free, image-free, GPU-free coverage
+  check (`src/agrinav/data/anchor_audit.py`).
+- `torch.cuda.amp.*` → `torch.amp.*('cuda')`.
+
+### Anchor-coverage result (hypothesis refuted)
+
+The anchor set is square-or-tall only (`aspect_ratios=(0.2, 0.33, 0.5, 1.0)`,
+max w/h = 1.0), which raised the possibility of a hard recall ceiling. Measured
+on the curated RICE splits, it is **not** one: only **0.48%** of train boxes
+(0.45% of val) fall below IoU 0.5 against the best anchor; mean best shape IoU
+is 0.836. The data is 84% tall boxes, so the anchors match it well. Two small
+pockets are genuinely uncovered and worth remembering if either grows:
+`w/h >= 2` boxes (n=207, 49% below 0.5) and `size:large` (n=258, 31% below 0.5).
+Reports: `reports/metrics/anchor_audit_rice_{train,valid}.json`.
+
+**Deliberately NOT done:** resume (`--resume`). It was a 3/3 reviewer priority
+when runs looked like they were dying at epoch 16; now that they complete in
+24 minutes on an A100 it is much lower value. The checkpoints do now carry
+`optimizer`, `scheduler`, `warmup`, `scaler`, and `global_step`, so it is a
+small addition when wanted.
+
 ## Current status — 2026-07-27
 
 **Detector can now warm-start from the RiceSEG backbone, and phase-2 (real RICE
