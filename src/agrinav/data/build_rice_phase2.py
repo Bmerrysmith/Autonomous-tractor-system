@@ -50,7 +50,7 @@ trained-on image, leaving 6 images in a fully clean group -- with zero weed
 boxes. And no metric was ever computed on the manifest's test split, so it stays
 valid for any model trained from scratch on this build; only the 2026-07-28
 checkpoints, which trained on part of it, may never be scored against it. See
-``TEST_SPLIT_BURNED.md`` in the output.
+``TEST_SPLIT_STATUS.md`` in the output.
 """
 
 from __future__ import annotations
@@ -815,7 +815,7 @@ def _write_outputs(
         "test_split_status": (
             "VALID for a model trained from scratch on this build; NEVER for the "
             "2026-07-28 checkpoints, which trained on part of it. "
-            "See TEST_SPLIT_BURNED.md"
+            "See TEST_SPLIT_STATUS.md"
         ),
         "json_sha256": json_hashes,
         "per_split": per_split,
@@ -889,7 +889,7 @@ adjacent frames of one capture sequence in train and test at once.
 - None of this supports a *generalization* claim: the manifest carries no farm,
   season, device, or illumination metadata. An external set is separate work.
 """
-    with open(os.path.join(out_root, "TEST_SPLIT_BURNED.md"), "w", encoding="utf-8") as handle:
+    with open(os.path.join(out_root, "TEST_SPLIT_STATUS.md"), "w", encoding="utf-8") as handle:
         handle.write(text)
 
 

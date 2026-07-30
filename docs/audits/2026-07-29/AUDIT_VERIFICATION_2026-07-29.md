@@ -421,6 +421,12 @@ split. Packaged to `RICE_phase2_rebuild.zip` (644,891,718 B, sha256
 `57484b9d…f190db27`, test excluded), then extracted and re-verified from the
 archive: preflight clean, `splits_absent: ["test"]`.
 
+> Superseded 2026-07-30: the archive was repackaged to correct a stale
+> `test_split_status` string in `manifests/provenance.json` and the renamed
+> `TEST_SPLIT_STATUS.md`. Current identity is 644,892,580 B, sha256
+> `40eb6370…8be3fd03`; no image, annotation or per-file hash changed. The
+> numbers in this section were accurate on the date of this report.
+
 The never-trained-on pool for a replacement test split is **781 images** (539
 currently-train, 160 currently-valid, 82 currently-test), flagged per image in
 `manifests/split_membership.json`.

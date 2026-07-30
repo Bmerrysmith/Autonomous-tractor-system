@@ -307,7 +307,7 @@ def test_build_keeps_segmentation_when_asked(source_tree, tmp_path):
 def test_build_writes_the_test_split_usage_notice(source_tree, tmp_path):
     out = tmp_path / "out"
     build(source_tree["root"], str(out), split_manifest=source_tree["manifest"])
-    text = (out / "TEST_SPLIT_BURNED.md").read_text(encoding="utf-8")
+    text = (out / "TEST_SPLIT_STATUS.md").read_text(encoding="utf-8")
     assert "may never be evaluated on this split" in text
     assert "trained from scratch" in text
     provenance = json.loads((out / "manifests" / "provenance.json").read_text())

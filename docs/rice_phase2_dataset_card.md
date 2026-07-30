@@ -36,10 +36,17 @@ Packaged training archive (train + valid only; test excluded by `package`):
 | Field | Value |
 |---|---|
 | File | `RICE_phase2_rebuild.zip` |
-| Bytes | 644,891,718 |
-| sha256 | `57484b9d30a062be4011e24eec9f898d9c571dcc4bef3cee487d9865f190db27` |
+| Bytes | 644,892,580 |
+| sha256 | `40eb6370f41eeb53333918cfbeb55d3696a848067e2c96a389a8e1508be3fd03` |
 | Members | 2,327 |
-| Verified | extracted and re-`preflight`ed clean on 2026-07-29: train 1,800 / 59,691, valid 518 / 15,226, `splits_absent: ["test"]` |
+| Verified | extracted and re-`preflight`ed clean on 2026-07-30: train 1,800 / 59,691, valid 518 / 15,226, `splits_absent: ["test"]` |
+
+Repackaged on 2026-07-30 (previously 644,891,718 B, sha256 `57484b9d…f190db27`).
+The only change is metadata: `manifests/provenance.json` carried a stale
+`test_split_status: "BURNED -- see TEST_SPLIT_BURNED.md"`, and that notice file
+was renamed `TEST_SPLIT_STATUS.md` when the verdict was corrected. **No image,
+annotation, count or per-file hash changed** — every sha256 in the table above is
+unchanged, which is the check that proves it.
 
 Superseded archive, **do not use**: `RICE_curated_phase2.zip`, 931,860,119 bytes,
 sha256 `2161e0691c5fef43a37274a7331adee7b6267b5032547a7320554804a19fa3ab`.

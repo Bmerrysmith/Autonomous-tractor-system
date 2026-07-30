@@ -1,6 +1,6 @@
 # Gate status — the one authoritative answer to "can I run this?"
 
-**Last updated: 2026-07-29.**
+**Last updated: 2026-07-30.**
 
 This file exists because three documents used to answer the same question three
 different ways: `START_HERE.md` said "do not train the detector yet",
@@ -21,8 +21,8 @@ narrative session log; this is the standing verdict.
 | Phase-1 RiceSEG segmentation pretraining | **DONE, closed** | best mIoU 0.5827 @ ep30, reproduced within 0.001 mIoU. `docs/research/RICESEG_PRETRAIN_RESULTS.md` |
 | Phase-2 detector: pipeline shakedown on the rebuilt dataset | **GO** | trainer completes 18/18 on an A100 in ~24 min; artifacts (`status.json`, `metrics.jsonl`, `weeddet_last.pth`) are unambiguous |
 | Phase-2 detector: a run reporting validation AP on the rebuilt split | **GO** | decode is class-aware, the model-to-COCO adapter is wired, and validation AP selects the checkpoint (`val_ap_interval`) |
-| Phase-2 detector: a headline accuracy claim | **NO-GO** | no same-protocol baselines yet, so there is nothing to claim *against*; and no external farm/season set, so nothing supports a generalization claim |
-| Evaluating the **2026-07-28 checkpoints** on the 261-image test split | **NO-GO, permanently** | those weights trained on 231 of its 261 images. Burned *for them*. Both runs are void anyway |
+| Phase-2 detector: a headline accuracy claim | **NO-GO** | the baseline harness exists but **no baseline has been run**, so there is still nothing to claim *against*; and no external farm/season set, so nothing supports a generalization claim |
+| Evaluating the **2026-07-28 checkpoints** on the 261-image test split | **NO-GO, permanently** | 231 of its 261 images were inside the archive those runs consumed — 179 as training data, 52 more in the archive's valid folder. Burned *for those weights*. Both runs are void anyway |
 | Evaluating a **freshly trained** checkpoint on that same test split | **GO** | contamination is a property of the weights, not the images. A model trained from scratch on the correctly-rebuilt split has never seen its own test set, and no metric was ever computed on those images — no evaluator existed until 2026-07-29. Corrected 2026-07-29; an earlier note here said "permanently burned", which was too strong |
 | Training on `RICE_curated_phase2.zip` (the 2026-07-27 archive) | **NO-GO** | 940 mis-assigned files, 231 intended-test images inside, 233 intended train/valid images missing. Superseded by the rebuild below |
 | Citing any metric from the 2026-07-28 runs | **NO-GO** | both voided; see the `VOID.md` files in their Drive run directories |
@@ -38,13 +38,15 @@ narrative session log; this is the standing verdict.
 |---|---:|---:|---:|---:|---:|
 | train | 1,800 | 59,691 | 52,194 | 7,497 | 35 |
 | valid | 518 | 15,226 | 13,201 | 2,025 | 80 |
-| test (**burned**) | 261 | 6,284 | 5,355 | 929 | 99 |
+| test (see verdict table above) | 261 | 6,284 | 5,355 | 929 | 99 |
 
 Full card: [`docs/rice_phase2_dataset_card.md`](rice_phase2_dataset_card.md).
 Packaged training archive (train + valid only): `RICE_phase2_rebuild.zip`,
-644,891,718 bytes, sha256
-`57484b9d30a062be4011e24eec9f898d9c571dcc4bef3cee487d9865f190db27`. Superseded and
-banned: `RICE_curated_phase2.zip`, sha256 `2161e069…a19fa3ab`.
+644,892,580 bytes, sha256
+`40eb6370f41eeb53333918cfbeb55d3696a848067e2c96a389a8e1508be3fd03` (repackaged
+2026-07-30 to correct a stale metadata string; no image, annotation or per-file
+hash changed). Superseded and banned: `RICE_curated_phase2.zip`, sha256
+`2161e069…a19fa3ab`.
 
 3 annotations rejected by the sanitation rule (all out-of-bounds by more than
 1 px) and 115 clipped; both itemized in `reports/rejected_annotations.json`.
@@ -90,9 +92,15 @@ before making a generalization claim.
    Retrain from scratch and use it; do not evaluate the old checkpoints on it.
 6. **Matched BN policy** across the ImageNet/RiceSEG arms (`--bn-policy trainable`
    on the ImageNet control; `auto` reproduces the old two-factor confound).
-7. **Same-protocol baselines** — at least one maintained dense detector and one
-   modern transformer detector on the identical split, resolution, and evaluator.
-   Without them a number has nothing to be measured against.
+7. **Same-protocol baselines** — the *harness* now exists
+   (`agrinav baseline-detector`, `configs/training/baseline_det_control.yaml`):
+   stock torchvision `fasterrcnn_resnet50_fpn_v2`, `retinanet_resnet50_fpn_v2`
+   and `fcos_resnet50_fpn` on the identical dataset class, the identical
+   letterbox, the identical evaluator and the identical `maxDets`, with the
+   internal resize/normalise disabled so the reference sees WeedDet's exact
+   tensor. **No baseline has been run yet.** Until at least one has, a WeedDet AP
+   still has nothing to be measured against. See
+   [`docs/baselines.md`](baselines.md).
 
 ## Standing engineering debt that does not block a shakedown
 
