@@ -181,6 +181,52 @@ def test_nonpositive_maxdets_raises():
         evaluate_coco_detections(gt, _perfect_detections(gt), max_dets=0)
 
 
+def test_ground_truth_without_area_is_scored_not_crashed():
+    """COCOeval raises a bare `KeyError: 'area'`; area is derivable from the bbox."""
+    gt = _gt()
+    for annotation in gt["annotations"]:
+        del annotation["area"]
+    result = evaluate_coco_detections(gt, _perfect_detections(gt))
+    assert result.ap == pytest.approx(1.0, abs=1e-6)
+
+
+def test_filling_area_does_not_change_the_score():
+    gt_with = _gt()
+    gt_without = _gt()
+    for annotation in gt_without["annotations"]:
+        del annotation["area"]
+    detections = _perfect_detections(gt_with)
+    scored_with = evaluate_coco_detections(gt_with, detections)
+    scored_without = evaluate_coco_detections(gt_without, detections)
+    assert scored_without.ap == pytest.approx(scored_with.ap)
+    assert scored_without.ap_small == pytest.approx(scored_with.ap_small)
+    assert scored_without.ap_medium == pytest.approx(scored_with.ap_medium)
+
+
+def test_ground_truth_without_iscrowd_is_scored():
+    gt = _gt()
+    for annotation in gt["annotations"]:
+        del annotation["iscrowd"]
+    result = evaluate_coco_detections(gt, _perfect_detections(gt))
+    assert result.ap == pytest.approx(1.0, abs=1e-6)
+
+
+def test_annotation_with_neither_area_nor_bbox_is_rejected():
+    gt = _gt()
+    del gt["annotations"][0]["area"]
+    del gt["annotations"][0]["bbox"]
+    with pytest.raises(ValueError, match="neither 'area' nor a 4-element 'bbox'"):
+        evaluate_coco_detections(gt, [])
+
+
+def test_filling_does_not_mutate_the_callers_ground_truth():
+    gt = _gt()
+    for annotation in gt["annotations"]:
+        del annotation["area"]
+    evaluate_coco_detections(gt, _perfect_detections(gt))
+    assert all("area" not in annotation for annotation in gt["annotations"])
+
+
 def test_missing_gt_file_raises_filenotfound():
     with pytest.raises(FileNotFoundError, match="ground-truth COCO file not found"):
         evaluate_coco_detections("does_not_exist.json", [])

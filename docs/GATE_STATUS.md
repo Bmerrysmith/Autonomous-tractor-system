@@ -20,7 +20,8 @@ narrative session log; this is the standing verdict.
 |---|---|---|
 | Phase-1 RiceSEG segmentation pretraining | **DONE, closed** | best mIoU 0.5827 @ ep30, reproduced within 0.001 mIoU. `docs/research/RICESEG_PRETRAIN_RESULTS.md` |
 | Phase-2 detector: pipeline shakedown on the rebuilt dataset | **GO** | trainer completes 18/18 on an A100 in ~24 min; artifacts (`status.json`, `metrics.jsonl`, `weeddet_last.pth`) are unambiguous |
-| Phase-2 detector: any run whose numbers will be quoted | **NO-GO** | selection is validation *loss*, not AP; multiclass decode is still class-agnostic; no canonical model-to-COCO evaluator |
+| Phase-2 detector: a run reporting validation AP on the rebuilt split | **GO** | decode is class-aware, the model-to-COCO adapter is wired, and validation AP selects the checkpoint (`val_ap_interval`) |
+| Phase-2 detector: a headline accuracy claim | **NO-GO** | no held-out test split (the manifest one is burned) and no same-protocol baselines, so there is nothing to claim *against* |
 | Any evaluation on the 261-image test split from `grouped_split.json` | **NO-GO, permanently** | 231 of its 261 images were trained on by the voided 2026-07-28 runs. It is burned. A replacement must be built from the never-trained-on pool |
 | Training on `RICE_curated_phase2.zip` (the 2026-07-27 archive) | **NO-GO** | 940 mis-assigned files, 231 intended-test images inside, 233 intended train/valid images missing. Superseded by the rebuild below |
 | Citing any metric from the 2026-07-28 runs | **NO-GO** | both voided; see the `VOID.md` files in their Drive run directories |
@@ -57,23 +58,35 @@ before making a generalization claim.
 
 ## What clears the "quotable numbers" gate
 
-In order. Each is independently verifiable.
+**Done (2026-07-29):**
 
-1. **Class-aware decode.** Expand `(anchor, class)` candidates; suppress per class
-   (`torchvision.ops.batched_nms` or a validated per-class Soft-NMS). Regression
-   test with overlapping rice and weed boxes.
-2. **One canonical model-to-COCO adapter** — inverse letterbox *with clipping*,
-   class-id mapping, score threshold, NMS, max-detections — wired into training.
-3. **Selection on validation AP** (AP50, AP@[.50:.95], per-class AP, AP-small,
-   AR), replacing validation loss. Keep `maxDets=100` as the comparable primary;
-   label anything else separately.
+1. ~~**Class-aware decode.**~~ `agrinav.inference.postprocess` expands every
+   `(anchor, class)` pair above threshold and suppresses **within** a class only,
+   via `torchvision.ops.batched_nms` or per-class Soft-NMS. Top-k is per class,
+   because a shared cap is one the 6.8:1 majority class wins. Regression-tested
+   with overlapping rice and weed boxes; `WeedDet._decode` now delegates to it.
+2. ~~**One canonical model-to-COCO adapter.**~~ `agrinav.evaluation.runner` —
+   inverse letterbox *with clipping*, class-id mapping, threshold, NMS,
+   max-detections — plus `agrinav evaluate-detector` for offline scoring. Tested
+   end to end: a stub predicting exactly the ground truth scores AP 1.0, and
+   shifting the boxes or swapping the class map moves it.
+3. ~~**Selection on validation AP.**~~ `val_ap_interval` runs the canonical decode
+   over the val split every N epochs and selects `best` on COCO AP (higher is
+   better), replacing validation loss. `maxDets` stays at 100; a nonstandard value
+   is flagged and its primary AP is the `-1.0` sentinel rather than a number.
+
+**Still required:**
+
 4. **A decoded-AP overfit gate** on the production construction path, replacing
    the current `final_loss < initial_loss` check.
 5. **A replacement test split**: whole groups drawn only from images with
-   `trained_on_legacy: false` in `manifests/split_membership.json`, with the
-   grouping rule recorded in an ADR.
+   `trained_on_legacy: false` in `manifests/split_membership.json` (781
+   available), with the grouping rule recorded in an ADR.
 6. **Matched BN policy** across the ImageNet/RiceSEG arms (`--bn-policy trainable`
    on the ImageNet control; `auto` reproduces the old two-factor confound).
+7. **Same-protocol baselines** — at least one maintained dense detector and one
+   modern transformer detector on the identical split, resolution, and evaluator.
+   Without them a number has nothing to be measured against.
 
 ## Standing engineering debt that does not block a shakedown
 

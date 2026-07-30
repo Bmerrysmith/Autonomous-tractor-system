@@ -442,6 +442,16 @@ file; `START_HERE.md` and `README.md` link to it instead of restating verdicts, 
 curated-RICE dataset. New `docs/rice_phase2_dataset_card.md` gives the phase-2
 dataset the card it never had.
 
+**P1 items 5-7 also landed** (ADR 0003). `agrinav.inference.postprocess` is now
+the single postprocessor: per-`(anchor, class)` candidates, within-class-only
+suppression via `batched_nms` or per-class Soft-NMS, per-class top-k, and an
+inverse letterbox that clips. `agrinav.evaluation.runner` /
+`agrinav evaluate-detector` is the model-to-COCO adapter, and `val_ap_interval`
+makes validation AP the checkpoint-selection metric. The decisive test drives the
+whole chain with a stub predicting exactly the ground truth and asserts AP 1.0;
+shifting the boxes or swapping the class map moves it, so it cannot pass on broken
+geometry.
+
 Not done, deliberately: the replacement test split. `grouped_split.json` stores
 `num_groups: 68` and `block_size: 40` but no per-file group ids, so the original
 grouping cannot be reproduced from it. `derive_group_id()` is an explicit

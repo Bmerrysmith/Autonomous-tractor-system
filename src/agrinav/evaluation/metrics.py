@@ -137,6 +137,43 @@ def _load_gt_dict(gt: str | os.PathLike[str] | Mapping[str, Any]) -> dict[str, A
     return data
 
 
+def _fill_derivable_gt_fields(gt_dict: dict[str, Any]) -> dict[str, Any]:
+    """Supply ``area`` and ``iscrowd`` where an export omitted them.
+
+    ``COCOeval`` indexes both unconditionally and raises a bare
+    ``KeyError: 'area'`` from deep inside ``evaluateImg`` when they are absent —
+    a real and common failure with hand-built or converted splits, and one whose
+    traceback says nothing about which file is at fault.
+
+    Both fields are *derivable*, so filling them changes no score: ``area`` is
+    the box area COCO would have stored, and ``iscrowd`` defaults to 0 in the
+    format itself. Anything not derivable is still rejected elsewhere rather than
+    guessed. Operates on a copy; the caller's mapping is untouched.
+    """
+    annotations = gt_dict.get("annotations")
+    if not annotations:
+        return gt_dict
+    if all("area" in ann and "iscrowd" in ann for ann in annotations):
+        return gt_dict
+
+    patched = dict(gt_dict)
+    filled = []
+    for ann in annotations:
+        record = dict(ann)
+        if "area" not in record:
+            bbox = record.get("bbox")
+            if not bbox or len(bbox) != 4:
+                raise ValueError(
+                    f"ground-truth annotation {record.get('id')!r} has neither 'area' nor a "
+                    "4-element 'bbox'; COCOeval cannot score it"
+                )
+            record["area"] = float(bbox[2]) * float(bbox[3])
+        record.setdefault("iscrowd", 0)
+        filled.append(record)
+    patched["annotations"] = filled
+    return patched
+
+
 def _load_detections(
     detections: Sequence[Mapping[str, Any]] | str | os.PathLike[str],
 ) -> list[dict[str, Any]]:
@@ -229,6 +266,7 @@ def evaluate_coco_detections(
     num_gt_annotations = len(gt_dict.get("annotations", []))
 
     _validate_detections(det_list, gt_image_ids, gt_category_ids)
+    gt_dict = _fill_derivable_gt_fields(gt_dict)
 
     # pycocotools chatters to stdout on load/eval; keep it out of clean logs.
     with contextlib.redirect_stdout(io.StringIO()):

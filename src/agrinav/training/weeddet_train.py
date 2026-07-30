@@ -42,6 +42,8 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
+from agrinav.inference.postprocess import invert_letterbox
+
 
 # ---------------------------------------------------------------- import WeedDet
 def _import_wd() -> Any:
@@ -102,6 +104,11 @@ _HARD_DEFAULTS: dict[str, Any] = {
     "val_ann_file": None,
     "val_images_root": None,
     "val_batch_size": None,
+    # Epochs between validation-AP evaluations; 0 selects on val loss instead.
+    # AP is the metric that actually describes detection quality -- loss can
+    # improve while detections get worse -- but it needs the canonical decode
+    # over the whole val split, so its cost is made explicit rather than hidden.
+    "val_ap_interval": 0,
     # 'auto' keeps the historical coupling (freeze BN for ImageNet, trainable
     # for an injected backbone); set explicitly to make the A/B single-factor.
     "bn_policy": "auto",
@@ -133,6 +140,7 @@ _CLI_TO_CONFIG: dict[str, str] = {
     "seed": "seed",
     "val_ann_file": "val_ann_file",
     "val_images_root": "val_images_root",
+    "val_ap_interval": "val_ap_interval",
     "bn_policy": "bn_policy",
 }
 
@@ -625,7 +633,12 @@ def predict_image(
     keep = scores >= score_thr
     boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
     if len(boxes):
-        boxes = _WD.unpad_boxes(boxes, scale_x, scale_y, pad_left, pad_top)
+        # Clip to the original image: a detection that reached into the grey
+        # letterbox padding otherwise comes back with negative coordinates.
+        boxes, inside = invert_letterbox(
+            boxes, scale_x, scale_y, pad_left, pad_top, orig_w=img.width, orig_h=img.height
+        )
+        boxes, scores, labels = boxes[inside], scores[inside], labels[inside]
     return img, boxes.numpy(), scores.numpy(), labels.numpy()
 
 
@@ -671,6 +684,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--val-images-root",
         default=None,
         help="images root for --val-ann-file (required with it)",
+    )
+    parser.add_argument(
+        "--val-ap-interval",
+        type=int,
+        default=None,
+        help="epochs between validation-AP evaluations; selects `best` on COCO AP "
+        "instead of val loss. 0 (default) keeps val-loss selection. Requires "
+        "--val-ann-file/--val-images-root",
     )
     parser.add_argument(
         "--bn-policy",

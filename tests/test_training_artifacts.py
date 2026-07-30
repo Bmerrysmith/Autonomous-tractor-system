@@ -289,6 +289,52 @@ def test_val_dataset_drives_checkpoint_selection(tmp_path):
     assert best["best_metric_name"] == "val/total_loss"
 
 
+def test_val_ap_interval_selects_on_ap_and_higher_is_better(tmp_path):
+    """AP selection must flip the comparison direction; loss selection is lower-better.
+
+    Selecting on validation AP with a `<` comparison would silently keep the
+    *worst* epoch, and on a randomly-initialised detector every AP is ~0.0, so a
+    test that only checked "it ran" would not notice.
+    """
+    dataset = _dataset(tmp_path)
+    config = _tiny_config(tmp_path, dataset, val_dataset=dataset, val_ap_interval=1)
+    wd.train_with_progress(config)
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "ckpt" / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows, "no metrics rows written"
+    for row in rows:
+        assert row["select_metric"] == "val/AP"
+        assert row["select_value"] == row["val/AP"]
+        for key in ("val/AP", "val/AP50", "val/AP75", "val/AR100"):
+            assert key in row, f"{key} missing from the epoch row"
+        assert row["val/eval_seconds"] >= 0
+
+    status = json.loads((tmp_path / "ckpt" / "status.json").read_text(encoding="utf-8"))
+    assert status["best_metric_name"] == "val/AP"
+    # Higher-is-better: the recorded best must be the maximum AP seen, not the min.
+    assert status["best_metric_value"] == pytest.approx(max(row["val/AP"] for row in rows))
+
+    best = torch.load(tmp_path / "ckpt" / "weeddet_best.pth", map_location="cpu", weights_only=True)
+    assert best["best_metric_name"] == "val/AP"
+
+
+def test_val_ap_interval_without_a_val_split_is_rejected(tmp_path):
+    """Failing closed beats silently falling back to a weaker selection metric."""
+    with pytest.raises(ValueError, match="requires a val_dataset"):
+        wd.train_with_progress(_tiny_config(tmp_path, _dataset(tmp_path), val_ap_interval=1))
+
+
+def test_val_loss_selection_is_unchanged_when_ap_is_off(tmp_path):
+    dataset = _dataset(tmp_path)
+    wd.train_with_progress(_tiny_config(tmp_path, dataset, val_dataset=dataset, val_ap_interval=0))
+    status = json.loads((tmp_path / "ckpt" / "status.json").read_text(encoding="utf-8"))
+    assert status["best_metric_name"] == "val/total_loss"
+
+
 def test_validation_does_not_update_batchnorm_statistics(tmp_path):
     """Validation must not leak into BN running stats (apply_bn_policy's warning)."""
     dataset = _dataset(tmp_path)

@@ -139,77 +139,20 @@ def elementwise_box_iou(boxes1, boxes2, eps=1e-7):
     return inter / (area1 + area2 - inter + eps)
 
 
-def nms(boxes, scores, iou_threshold):
-    """Torch-only hard NMS fallback used when Soft-NMS is disabled."""
-    if boxes.numel() == 0:
-        return torch.empty((0,), dtype=torch.long, device=boxes.device)
-
-    order = scores.argsort(descending=True)
-    keep = []
-    while order.numel() > 0:
-        i = order[0]
-        keep.append(i)
-        if order.numel() == 1:
-            break
-        ious = box_iou(boxes[i].unsqueeze(0), boxes[order[1:]]).squeeze(0)
-        order = order[1:][ious <= iou_threshold]
-
-    return torch.stack(keep) if keep else torch.empty((0,), dtype=torch.long, device=boxes.device)
-
-
-def soft_nms(boxes, scores, iou_threshold=0.50, sigma=0.5,
-             score_threshold=0.001, max_dets=1000, method='gaussian'):
-    """
-    Soft-NMS for dense weeds/rice. Returns indices into the input tensors and
-    the decayed scores for those kept indices.
-    """
-    if boxes.numel() == 0:
-        empty = torch.empty((0,), dtype=torch.long, device=boxes.device)
-        return empty, scores.new_zeros((0,))
-
-    boxes_work = boxes.clone()
-    scores_work = scores.clone()
-    idxs = torch.arange(scores.shape[0], device=boxes.device)
-    keep, keep_scores = [], []
-
-    while idxs.numel() > 0 and len(keep) < max_dets:
-        max_pos = torch.argmax(scores_work)
-        max_score = scores_work[max_pos]
-        if max_score < score_threshold:
-            break
-
-        keep.append(idxs[max_pos])
-        keep_scores.append(max_score)
-
-        if idxs.numel() == 1:
-            break
-
-        cur_box = boxes_work[max_pos].unsqueeze(0)
-        remain = torch.ones(idxs.numel(), dtype=torch.bool, device=boxes.device)
-        remain[max_pos] = False
-        boxes_work = boxes_work[remain]
-        scores_work = scores_work[remain]
-        idxs = idxs[remain]
-
-        ious = box_iou(cur_box, boxes_work).squeeze(0)
-        if method == 'linear':
-            decay = torch.where(ious > iou_threshold, 1 - ious, torch.ones_like(ious))
-        elif method == 'hard':
-            decay = torch.where(ious > iou_threshold, torch.zeros_like(ious), torch.ones_like(ious))
-        else:
-            decay = torch.exp(-(ious * ious) / sigma)
-
-        scores_work = scores_work * decay
-        valid = scores_work >= score_threshold
-        boxes_work = boxes_work[valid]
-        scores_work = scores_work[valid]
-        idxs = idxs[valid]
-
-    if not keep:
-        empty = torch.empty((0,), dtype=torch.long, device=boxes.device)
-        return empty, scores.new_zeros((0,))
-
-    return torch.stack(keep), torch.stack(keep_scores)
+# NMS lives in the canonical postprocessor so training-time validation, offline
+# evaluation, and any future runtime cannot drift into three different
+# protocols. Re-exported here because notebooks and older code import them from
+# this module. `nms` keeps its historical name; `hard_nms` is the canonical one.
+from agrinav.inference.postprocess import (  # noqa: E402
+    DEFAULT_MAX_DETECTIONS,
+    DEFAULT_NMS_IOU,
+    DEFAULT_PRE_NMS_TOPK,
+    DEFAULT_SCORE_THRESHOLD,
+    decode_batch,
+    invert_letterbox,
+)
+from agrinav.inference.postprocess import hard_nms as nms  # noqa: E402
+from agrinav.inference.postprocess import soft_nms  # noqa: E402
 
 
 # ===========================================================================
@@ -274,17 +217,23 @@ def letterbox_pil(img, size=512, fill=114):
     return canvas, scale_x, scale_y, pad_left, pad_top
 
 
-def unpad_boxes(boxes, scale_x, scale_y, pad_left, pad_top):
+def unpad_boxes(boxes, scale_x, scale_y, pad_left, pad_top,
+                orig_w=None, orig_h=None):
     """Invert letterbox transform on predicted boxes → original image coords.
 
-    Uses the same exact per-axis scales returned by `letterbox_pil`.
+    Uses the same exact per-axis scales returned by `letterbox_pil`, and
+    delegates to the canonical inverse in `agrinav.inference.postprocess` so
+    training, evaluation, and inference share one geometry path.
+
+    Pass `orig_w`/`orig_h` to clip to the original image. Without them the
+    mapping is unclipped, which is how detections that reached into the grey
+    letterbox padding used to come back with negative coordinates — real area,
+    as far as pycocotools is concerned. Callers that will score or draw these
+    boxes should always pass the original size; `predict_image` does.
     """
-    boxes = boxes.clone().float()
-    boxes[:, [0, 2]] -= pad_left
-    boxes[:, [1, 3]] -= pad_top
-    boxes[:, [0, 2]] /= scale_x
-    boxes[:, [1, 3]] /= scale_y
-    return boxes
+    mapped, _keep = invert_letterbox(
+        boxes, scale_x, scale_y, pad_left, pad_top, orig_w=orig_w, orig_h=orig_h)
+    return mapped
 
 # ===========================================================================
 # SECTION 1 — BACKBONE: Det-ResNet-50
@@ -1021,76 +970,38 @@ class WeedDet(nn.Module):
         return cls_logits, regs, anchors, images.shape[-2:]
 
     def _decode(self, cls_logits, regs, anchors, img_shape,
-                score_thr=0.05, nms_thr=0.50, max_dets=1000,
+                score_thr=DEFAULT_SCORE_THRESHOLD, nms_thr=DEFAULT_NMS_IOU,
+                max_dets=DEFAULT_MAX_DETECTIONS,
                 output_thr=None, use_soft_nms=True, soft_nms_sigma=0.5,
-                pre_nms_topk=5000):
+                pre_nms_topk=DEFAULT_PRE_NMS_TOPK):
+        """Decode head outputs to per-image detections in letterboxed space.
+
+        Delegates to `agrinav.inference.postprocess.decode_batch`, the single
+        canonical postprocessor. This method used to keep only the top-scoring
+        class per anchor and then run one class-agnostic NMS pass over every
+        surviving box, so a rice detection could suppress an overlapping weed
+        detection and the losing class hypothesis never reached the metric.
+
+        score_thr     : pre-suppression candidate gate (0.05 = COCO convention)
+        nms_thr       : IoU threshold for suppression, applied within a class
+        max_dets      : per-image cap after suppression (100 = COCO maxDets)
+        output_thr    : optional gate after suppression; defaults to score_thr
+        use_soft_nms  : decay overlapping scores instead of deleting boxes
+        pre_nms_topk  : per-class candidate cap (per class, not global: the
+                        dataset is ~6.8:1 rice-to-weed, and a shared cap is one
+                        the majority class wins)
         """
-        score_thr     : pre-NMS candidate gate (keep low for valid COCO mAP)
-        nms_thr       : IoU threshold/reference for NMS — analysis recommended 0.50
-        max_dets      : hard cap after NMS
-        output_thr    : optional second threshold applied after NMS
-        use_soft_nms  : enabled by default per analysis recommendation
-        pre_nms_topk  : candidate cap to keep Soft-NMS practical
-        """
-        if output_thr is None:
-            output_thr = score_thr
-
-        B   = cls_logits[0].shape[0]
-        C   = self.num_classes
-        H, W = img_shape
-
-        cls_f = torch.cat([
-            c.permute(0,2,3,1).reshape(B,-1,C) for c in cls_logits], dim=1)
-        reg_f = torch.cat([
-            r.permute(0,2,3,1).reshape(B,-1,4) for r in regs], dim=1)
-
-        results = []
-        for b in range(B):
-            scores, labels = cls_f[b].sigmoid().max(dim=1)
-            keep   = scores > score_thr
-            scores = scores[keep]; labels = labels[keep]
-            deltas = reg_f[b][keep]
-            anch   = anchors[keep]
-
-            aw = anch[:,2]-anch[:,0]; ah = anch[:,3]-anch[:,1]
-            ax = (anch[:,0]+anch[:,2])*0.5; ay = (anch[:,1]+anch[:,3])*0.5
-            px = deltas[:,0]*aw+ax; py = deltas[:,1]*ah+ay
-            pw = torch.exp(deltas[:,2].clamp(max=4))*aw
-            ph = torch.exp(deltas[:,3].clamp(max=4))*ah
-            boxes = torch.stack([
-                (px-pw/2).clamp(0,W), (py-ph/2).clamp(0,H),
-                (px+pw/2).clamp(0,W), (py+ph/2).clamp(0,H)], dim=1)
-
-            if scores.numel() == 0:
-                results.append({
-                    'boxes' : boxes,
-                    'scores': scores,
-                    'labels': labels,
-                })
-                continue
-
-            if pre_nms_topk is not None and scores.numel() > pre_nms_topk:
-                scores, topk_idx = scores.topk(pre_nms_topk)
-                boxes  = boxes[topk_idx]
-                labels = labels[topk_idx]
-
-            if use_soft_nms:
-                keep2, nms_scores = soft_nms(
-                    boxes, scores, iou_threshold=nms_thr, sigma=soft_nms_sigma,
-                    score_threshold=output_thr, max_dets=max_dets
-                )
-                boxes  = boxes[keep2]; scores = nms_scores; labels = labels[keep2]
-            else:
-                keep2  = nms(boxes, scores, nms_thr)[:max_dets]
-                boxes  = boxes[keep2]; scores = scores[keep2]; labels = labels[keep2]
-
-            out_keep = scores > output_thr
-            results.append({
-                'boxes' : boxes[out_keep],
-                'scores': scores[out_keep],
-                'labels': labels[out_keep],
-            })
-        return results
+        return decode_batch(
+            cls_logits, regs, anchors, img_shape,
+            num_classes=self.num_classes,
+            score_threshold=score_thr,
+            nms_iou=nms_thr,
+            max_detections=max_dets,
+            output_threshold=output_thr,
+            use_soft_nms=use_soft_nms,
+            soft_nms_sigma=soft_nms_sigma,
+            pre_nms_topk=pre_nms_topk,
+        )
 
 # ===========================================================================
 # SECTION 7 — DATASET: WeedDataset (PASCAL VOC XML)
@@ -1658,8 +1569,32 @@ def train_with_progress(config):
             shuffle=False, collate_fn=collate_fn,
             num_workers=config.get('num_workers', 2), pin_memory=True)
         print(f"Val  : {len(val_ds)} images | {len(val_loader)} batches")
-    select_metric = 'val/total_loss' if val_loader is not None else 'train/total_loss'
-    print(f"Checkpoint selection metric: {select_metric}")
+
+    # Validation *AP* is the real selection metric when it is available: loss is
+    # a proxy that a detector can improve while its detections get worse, and
+    # the July-29 audit found selection running on training loss alone. AP needs
+    # the canonical decode, so it is opt-in via `val_ap_interval` (epochs between
+    # evaluations; 0 disables) and requires the val dataset to expose the COCO
+    # file it came from.
+    val_ap_interval = int(config.get('val_ap_interval', 0) or 0)
+    val_ap_ann_file = getattr(val_ds, 'ann_file', None) if val_ds is not None else None
+    use_val_ap = bool(val_ap_interval > 0 and val_ap_ann_file)
+    if val_ap_interval > 0 and not use_val_ap:
+        raise ValueError(
+            "val_ap_interval > 0 requires a val_dataset that records the COCO file it "
+            "was built from (its `ann_file` attribute). Pass --val-ann-file/"
+            "--val-images-root, or set val_ap_interval: 0 to select on val loss.")
+
+    if use_val_ap:
+        select_metric, higher_is_better = 'val/AP', True
+    elif val_loader is not None:
+        select_metric, higher_is_better = 'val/total_loss', False
+    else:
+        select_metric, higher_is_better = 'train/total_loss', False
+    best_loss = float('-inf') if higher_is_better else float('inf')
+    last_val_ap: dict = {}
+    print(f"Checkpoint selection metric: {select_metric} "
+          f"({'higher' if higher_is_better else 'lower'} is better)")
 
     # tqdm floods the notebook otherwise: 225 batches x 18 epochs x a forced
     # redraw per batch produced ~424k-496k characters in one Colab cell, which
@@ -1786,8 +1721,35 @@ def train_with_progress(config):
             for key, value in selected.items():
                 val_metrics[f'val/{key}'] = value
 
-        epoch_metric = (val_metrics.get('val/total_loss', float('inf'))
-                        if val_loader is not None else avg_loss)
+        # Validation AP on the weights that will actually be saved. Run at
+        # `val_ap_interval` because a full decode over the val split costs real
+        # time; on an off-epoch the previous AP is carried forward so `best`
+        # never compares an AP epoch against a no-AP epoch.
+        if use_val_ap and (epoch % val_ap_interval == 0 or epoch == num_epochs):
+            from agrinav.evaluation.runner import evaluate_split
+            scored = ema.ema if ema is not None else model
+            ap_result, _dets, ap_protocol = evaluate_split(
+                scored, val_ds, val_ap_ann_file, device=str(device),
+                img_size=config.get('img_size', 512),
+                batch_size=config.get('val_batch_size', config.get('batch_size', 2)))
+            val_ap = {
+                'val/AP': ap_result.ap, 'val/AP50': ap_result.ap50,
+                'val/AP75': ap_result.ap75, 'val/AP_small': ap_result.ap_small,
+                'val/AR100': ap_result.ar_100,
+                'val/eval_seconds': ap_protocol['predict_seconds'],
+            }
+            for cat_id, value in ap_result.per_category_ap.items():
+                name = ap_result.category_names.get(cat_id, str(cat_id))
+                val_ap[f'val/AP[{name}]'] = value
+            val_metrics.update(val_ap)
+            last_val_ap = val_ap
+
+        if use_val_ap:
+            epoch_metric = val_metrics.get('val/AP', last_val_ap.get('val/AP', float('-inf')))
+        elif val_loader is not None:
+            epoch_metric = val_metrics.get('val/total_loss', float('inf'))
+        else:
+            epoch_metric = avg_loss
 
         row = {'epoch': epoch, 'num_epochs': num_epochs,
                'train/total_loss': avg_loss, 'n_batches': n_batches,
@@ -1801,7 +1763,8 @@ def train_with_progress(config):
         append_metrics_row(ckpt_dir, row)
         history.append(row)
 
-        is_best = epoch_metric < best_loss
+        is_best = (epoch_metric > best_loss if higher_is_better
+                   else epoch_metric < best_loss)
         if is_best:
             best_loss, best_epoch = epoch_metric, epoch
 

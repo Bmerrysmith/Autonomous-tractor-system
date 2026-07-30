@@ -42,6 +42,7 @@ COMMANDS: dict[str, str] = {
     "train-detector": "agrinav.training.weeddet_train",
     # --- evaluation ---
     "evaluate": "agrinav.evaluation.metrics",
+    "evaluate-detector": "agrinav.evaluation.runner",
 }
 
 

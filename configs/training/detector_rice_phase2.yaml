@@ -66,6 +66,15 @@ use_ema: true               # track an EMA of weights for the saved checkpoint
 # selects the best checkpoint. Without them, selection falls back to training
 # loss, which on this recipe moves less between the last five epochs than the
 # augmentation noise on the same quantity -- i.e. it ranks noise.
+#
+# val_ap_interval > 0 upgrades that again: every N epochs the EMA weights are run
+# through the canonical class-aware decode over the whole val split and scored
+# with pycocotools, and COCO AP -- higher is better -- selects `best`. This is
+# the only selection metric that describes detection quality; a detector can
+# lower its loss while its detections get worse. It costs a full decode pass over
+# 518 images, hence the interval rather than every epoch. Requires
+# --val-ann-file/--val-images-root; 0 keeps val-loss selection.
+val_ap_interval: 2
 # 'auto' keeps BN frozen where ImageNet stats exist and trainable for an
 # injected backbone. That coupling makes the ImageNet-vs-RiceSEG A/B a TWO-factor
 # change (backbone weights AND BN trainability). For a single-factor comparison,

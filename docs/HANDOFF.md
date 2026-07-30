@@ -49,7 +49,43 @@ images never trained on; `manifests/split_membership.json` in the rebuilt datase
 carries a `trained_on_legacy` flag and a re-derived `group_id` per image for
 exactly that purpose.
 
-### Landed this session (`feat/training-observability`, pushed)
+### Landed this session, part 2 — the evaluation path exists now
+
+**`agrinav.inference.postprocess` is the one canonical postprocessor** (ADR
+0003). Every `(anchor, class)` pair above threshold is its own candidate, and
+suppression is within-class only — `torchvision.ops.batched_nms` or per-class
+Soft-NMS. Top-k is per class, because a shared cap is one the 6.8:1 majority class
+wins. The inverse letterbox lives here and clips to the original image, so
+detections that reached into the padding no longer come back as negative
+coordinates. `WeedDet._decode` delegates to it; `nms`/`soft_nms`/`box_iou` moved
+here and are re-exported from the monolith, so there is one implementation.
+
+**`agrinav.evaluation.runner` is the model-to-COCO adapter**, exposed as
+`agrinav evaluate-detector`. It records the whole protocol (image size, score
+threshold, NMS IoU, max detections, Soft-NMS, top-k) next to the metrics, so two
+runs can be compared or shown to be incomparable. Tested end to end: a stub
+predicting exactly the ground truth scores AP 1.0, and shifting the boxes or
+swapping the class map moves it — so the test cannot pass on broken geometry.
+
+**Checkpoint selection is validation AP** when `val_ap_interval > 0` (set to 2 in
+`detector_rice_phase2.yaml`). The EMA weights — the ones actually saved — are
+decoded over the val split and scored; `best` is the maximum AP. The comparison
+direction flips with the metric, and that is a tested invariant: selecting AP with
+a `<` comparison would keep the worst epoch, and on a fresh detector every AP is
+~0.0, so a test that only checked "it ran" would not notice. `metrics.jsonl` now
+carries AP, AP50, AP75, AP-small, AR100 and per-class AP per epoch.
+
+Also: `evaluate_coco_detections` fills a derivable `area`/`iscrowd` on ground
+truth that omits them. `COCOeval` otherwise dies with a bare `KeyError: 'area'`
+from inside `evaluateImg`, which says nothing about which file is wrong. Filling a
+derivable field changes no score — pinned by a test that scores the same
+detections with and without.
+
+What this does *not* clear: there is still no held-out test split (the manifest
+one is burned) and no same-protocol baselines, so validation AP is a development
+signal, not a headline number. See `docs/GATE_STATUS.md`.
+
+### Landed this session, part 1 (`feat/training-observability`, pushed)
 
 - **`agrinav data-build-rice-phase2`** (`src/agrinav/data/build_rice_phase2.py`,
   35 tests) — `build` / `preflight` / `package`. Rebuilds from
