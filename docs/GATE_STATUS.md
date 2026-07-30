@@ -19,8 +19,8 @@ narrative session log; this is the standing verdict.
 | Activity | Verdict | Why |
 |---|---|---|
 | Phase-1 RiceSEG segmentation pretraining | **DONE, closed** | best mIoU 0.5827 @ ep30, reproduced within 0.001 mIoU. `docs/research/RICESEG_PRETRAIN_RESULTS.md` |
-| Phase-2 detector: pipeline shakedown on the rebuilt dataset | **GO** | trainer completes 18/18 on an A100 in ~24 min; artifacts (`status.json`, `metrics.jsonl`, `weeddet_last.pth`) are unambiguous |
-| Phase-2 detector: a run reporting validation AP on the rebuilt split | **GO** | decode is class-aware, the model-to-COCO adapter is wired, and validation AP selects the checkpoint (`val_ap_interval`) |
+| Phase-2 detector: pipeline shakedown on the rebuilt dataset | **GO FOR A FRESH RERUN** | the validation-loader batch-size crash is fixed and regression-tested; the two 2026-07-30 attempts stopped before recording epoch 1 and are not usable runs |
+| Phase-2 detector: a run reporting validation AP on the rebuilt split | **GO FOR A FRESH RERUN** | decode is class-aware, the model-to-COCO adapter is wired, validation AP selects the checkpoint (`val_ap_interval`), and validation now uses an explicit positive batch size |
 | Phase-2 detector: a headline accuracy claim | **NO-GO** | the baseline harness exists but **no baseline has been run**, so there is still nothing to claim *against*; and no external farm/season set, so nothing supports a generalization claim |
 | Evaluating the **2026-07-28 checkpoints** on the 261-image test split | **NO-GO, permanently** | 231 of its 261 images were inside the archive those runs consumed — 179 as training data, 52 more in the archive's valid folder. Burned *for those weights*. Both runs are void anyway |
 | Evaluating a **freshly trained** checkpoint on that same test split | **GO** | contamination is a property of the weights, not the images. A model trained from scratch on the correctly-rebuilt split has never seen its own test set, and no metric was ever computed on those images — no evaluator existed until 2026-07-29. Corrected 2026-07-29; an earlier note here said "permanently burned", which was too strong |
@@ -53,6 +53,26 @@ hash changed). Superseded and banned: `RICE_curated_phase2.zip`, sha256
 Zero duplicate image hashes. `preflight` re-verifies per-image hashes, decoded
 dimensions against the COCO records, in-bounds boxes, cross-split duplicates, and
 stray files — and fails closed.
+
+## 2026-07-30 validation-loader incident
+
+The runs `weeddet_rice_20260730_204639` and
+`weeddet_rice_20260730_205448` are failed launch attempts, not training results.
+Both initialized correctly but wrote no `metrics.jsonl`, checkpoint, or
+`status.json`.
+
+Root cause: the CLI defaults carried `val_batch_size: null`, and the model passed
+that value directly to PyTorch. `batch_size=None` disables DataLoader automatic
+batching, so the first validation sample reached the list-based collator as a raw
+`(image, target)` tuple and raised `KeyError(0)`. Training completed its first
+training pass but crashed before validation could record epoch 1.
+
+The driver now resolves a null validation batch size to the training batch size;
+the model boundary validates the value defensively; the Phase-2 YAML sets
+`val_batch_size: 8` explicitly; and a production-path regression test runs a
+CLI-built train-plus-validation epoch. The Colab notebook also persists stderr
+to the Drive run directory and refuses to treat a missing status file as
+completion. Verified locally: 308 tests plus 16 subtests pass.
 
 Known residual, not a blocker but not "leakage-free" either: 3 re-derived
 capture-family/frame-block groups straddle a split boundary, because the source

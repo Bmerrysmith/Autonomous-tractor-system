@@ -40,6 +40,7 @@ use_atss: true              # ATSS positive/negative anchor assignment
 pretrained_backbone: true   # fallback only; --riceseg-backbone overrides this
 img_size: 512               # square letterbox input
 batch_size: 8               # fits a T4; raise on an A100 if memory allows
+val_batch_size: 8           # explicit: never disable DataLoader auto-batching
 num_workers: 2              # Colab typically exposes ~2 CPU cores
 base_lr: 0.001              # WeedDet default SGD LR
 momentum: 0.9

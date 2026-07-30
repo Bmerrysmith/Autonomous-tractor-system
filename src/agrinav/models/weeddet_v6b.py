@@ -1270,6 +1270,24 @@ def collate_fn(batch):
     tgts = [b[1] for b in batch]
     return imgs, tgts
 
+
+def _resolve_batch_size(config, key, *, fallback_key=None, default=2):
+    """Resolve a positive batch size without passing None to DataLoader.
+
+    PyTorch interprets ``batch_size=None`` as "disable automatic batching".
+    That mode is incompatible with :func:`collate_fn`, which expects a list of
+    samples, and turns a configuration sentinel into a delayed validation
+    crash.
+    """
+    value = config.get(key)
+    if value is None and fallback_key is not None:
+        value = config.get(fallback_key)
+    if value is None:
+        value = default
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{key} must be a positive integer, got {value!r}")
+    return value
+
 # ===========================================================================
 # SECTION 8 — TRAINING UTILITIES
 # ===========================================================================
@@ -1514,11 +1532,13 @@ def train_with_progress(config):
                         verbose=True)
     print(f"[bn-policy] {bn_policy} -> {config['bn_policy_resolved']}")
 
-    img_size   = config.get('img_size', 512)
+    img_size = config.get('img_size', 512)
+    train_batch_size = _resolve_batch_size(config, 'batch_size', default=2)
+    config['batch_size'] = train_batch_size
     train_ds = (config['train_dataset'] if config.get('train_dataset') is not None
                 else WeedDataset(config['data_root'], 'train', img_size, augment=True))
     train_loader = DataLoader(
-        train_ds, batch_size=config.get('batch_size', 2),
+        train_ds, batch_size=train_batch_size,
         shuffle=True, collate_fn=collate_fn,
         num_workers=config.get('num_workers', 2), pin_memory=True)
     print(f"Train: {len(train_ds)} images | {len(train_loader)} batches/epoch")
@@ -1563,9 +1583,13 @@ def train_with_progress(config):
     # saved weights were the EMA — the metric never scored the artifact.
     val_ds = config.get('val_dataset')
     val_loader = None
+    val_batch_size = None
     if val_ds is not None:
+        val_batch_size = _resolve_batch_size(
+            config, 'val_batch_size', fallback_key='batch_size', default=2)
+        config['val_batch_size'] = val_batch_size
         val_loader = DataLoader(
-            val_ds, batch_size=config.get('val_batch_size', config.get('batch_size', 2)),
+            val_ds, batch_size=val_batch_size,
             shuffle=False, collate_fn=collate_fn,
             num_workers=config.get('num_workers', 2), pin_memory=True)
         print(f"Val  : {len(val_ds)} images | {len(val_loader)} batches")
@@ -1731,7 +1755,7 @@ def train_with_progress(config):
             ap_result, _dets, ap_protocol = evaluate_split(
                 scored, val_ds, val_ap_ann_file, device=str(device),
                 img_size=config.get('img_size', 512),
-                batch_size=config.get('val_batch_size', config.get('batch_size', 2)))
+                batch_size=val_batch_size)
             val_ap = {
                 'val/AP': ap_result.ap, 'val/AP50': ap_result.ap50,
                 'val/AP75': ap_result.ap75, 'val/AP_small': ap_result.ap_small,

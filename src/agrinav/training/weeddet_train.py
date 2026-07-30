@@ -140,6 +140,7 @@ _CLI_TO_CONFIG: dict[str, str] = {
     "seed": "seed",
     "val_ann_file": "val_ann_file",
     "val_images_root": "val_images_root",
+    "val_batch_size": "val_batch_size",
     "val_ap_interval": "val_ap_interval",
     "bn_policy": "bn_policy",
 }
@@ -370,6 +371,11 @@ def build_config(args: argparse.Namespace) -> dict[str, Any]:
     cfg["pretrained_backbone"] = _resolve_pretrained(cfg, args)
     if cfg.get("use_amp") is None:
         cfg["use_amp"] = torch.cuda.is_available()
+    # `_HARD_DEFAULTS` uses None to mean "same as training". Leaving that
+    # sentinel unresolved disables DataLoader automatic batching and sends a
+    # raw `(image, target)` sample into the list-based collate function.
+    if cfg.get("val_batch_size") is None:
+        cfg["val_batch_size"] = cfg["batch_size"]
 
     if cfg.get("riceseg_backbone"):
         cfg["backbone_init"] = _make_riceseg_backbone_init(cfg["riceseg_backbone"])
@@ -684,6 +690,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--val-images-root",
         default=None,
         help="images root for --val-ann-file (required with it)",
+    )
+    parser.add_argument(
+        "--val-batch-size",
+        type=int,
+        default=None,
+        help="validation images per step (default: same as --batch-size)",
     )
     parser.add_argument(
         "--val-ap-interval",

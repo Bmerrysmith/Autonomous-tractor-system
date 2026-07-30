@@ -229,6 +229,43 @@ def test_build_config_wires_the_val_split_unaugmented(tmp_path):
     assert config["val_dataset"] is not None
     assert config["val_dataset"].augment is False, "val must not be augmented"
     assert config["train_dataset"].augment is True
+    assert config["val_batch_size"] == config["batch_size"]
+
+
+def test_model_defensively_resolves_none_val_batch_size():
+    assert (
+        wd._resolve_batch_size(  # noqa: SLF001 - regression-tests the internal guard
+            {"batch_size": 8, "val_batch_size": None},
+            "val_batch_size",
+            fallback_key="batch_size",
+        )
+        == 8
+    )
+
+
+def test_cli_default_val_batch_size_runs_validation(tmp_path):
+    """The CLI's None sentinel must not disable DataLoader auto-batching.
+
+    This is the production failure path: ``build_config`` used to retain
+    ``val_batch_size=None`` and ``train_with_progress`` passed it directly to
+    DataLoader. The first validation sample then reached ``collate_fn`` as a
+    raw ``(image, target)`` tuple and raised ``KeyError(0)`` before any epoch
+    metrics or checkpoints could be written.
+    """
+    from agrinav.training.weeddet_train import build_config
+
+    config = build_config(_val_args(tmp_path))
+    assert config["val_batch_size"] == config["batch_size"] == 4
+
+    wd.train_with_progress(config)
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "ckpt" / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["val/total_loss"] > 0
 
 
 def test_build_config_rejects_a_half_specified_val_split(tmp_path):
