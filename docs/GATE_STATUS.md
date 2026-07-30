@@ -21,8 +21,9 @@ narrative session log; this is the standing verdict.
 | Phase-1 RiceSEG segmentation pretraining | **DONE, closed** | best mIoU 0.5827 @ ep30, reproduced within 0.001 mIoU. `docs/research/RICESEG_PRETRAIN_RESULTS.md` |
 | Phase-2 detector: pipeline shakedown on the rebuilt dataset | **GO** | trainer completes 18/18 on an A100 in ~24 min; artifacts (`status.json`, `metrics.jsonl`, `weeddet_last.pth`) are unambiguous |
 | Phase-2 detector: a run reporting validation AP on the rebuilt split | **GO** | decode is class-aware, the model-to-COCO adapter is wired, and validation AP selects the checkpoint (`val_ap_interval`) |
-| Phase-2 detector: a headline accuracy claim | **NO-GO** | no held-out test split (the manifest one is burned) and no same-protocol baselines, so there is nothing to claim *against* |
-| Any evaluation on the 261-image test split from `grouped_split.json` | **NO-GO, permanently** | 231 of its 261 images were trained on by the voided 2026-07-28 runs. It is burned. A replacement must be built from the never-trained-on pool |
+| Phase-2 detector: a headline accuracy claim | **NO-GO** | no same-protocol baselines yet, so there is nothing to claim *against*; and no external farm/season set, so nothing supports a generalization claim |
+| Evaluating the **2026-07-28 checkpoints** on the 261-image test split | **NO-GO, permanently** | those weights trained on 231 of its 261 images. Burned *for them*. Both runs are void anyway |
+| Evaluating a **freshly trained** checkpoint on that same test split | **GO** | contamination is a property of the weights, not the images. A model trained from scratch on the correctly-rebuilt split has never seen its own test set, and no metric was ever computed on those images — no evaluator existed until 2026-07-29. Corrected 2026-07-29; an earlier note here said "permanently burned", which was too strong |
 | Training on `RICE_curated_phase2.zip` (the 2026-07-27 archive) | **NO-GO** | 940 mis-assigned files, 231 intended-test images inside, 233 intended train/valid images missing. Superseded by the rebuild below |
 | Citing any metric from the 2026-07-28 runs | **NO-GO** | both voided; see the `VOID.md` files in their Drive run directories |
 | Public release of code or data | **NO-GO** | no project license selected; the Roboflow RICE source's licence is unrecorded |
@@ -79,9 +80,14 @@ before making a generalization claim.
 
 4. **A decoded-AP overfit gate** on the production construction path, replacing
    the current `final_loss < initial_loss` check.
-5. **A replacement test split**: whole groups drawn only from images with
-   `trained_on_legacy: false` in `manifests/split_membership.json` (781
-   available), with the grouping rule recorded in an ADR.
+5. ~~**A replacement test split.**~~ Not needed, and not buildable as originally
+   described. Measured 2026-07-29: of the 781 never-trained-on images, only **6**
+   sit in a re-derived group containing no trained-on image, and those 6 carry
+   **zero weed boxes**. "Whole clean groups" yields an empty test set. It is also
+   unnecessary — the manifest's own 261-image test split is valid for any model
+   trained from scratch on the rebuilt data, because no metric was ever computed
+   on it and contamination lives in the 2026-07-28 weights, which are void.
+   Retrain from scratch and use it; do not evaluate the old checkpoints on it.
 6. **Matched BN policy** across the ImageNet/RiceSEG arms (`--bn-policy trainable`
    on the ImageNet control; `auto` reproduces the old two-factor confound).
 7. **Same-protocol baselines** — at least one maintained dense detector and one

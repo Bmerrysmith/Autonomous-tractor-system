@@ -304,13 +304,14 @@ def test_build_keeps_segmentation_when_asked(source_tree, tmp_path):
     assert any("segmentation" in ann for ann in doc["annotations"])
 
 
-def test_build_writes_the_burned_test_notice(source_tree, tmp_path):
+def test_build_writes_the_test_split_usage_notice(source_tree, tmp_path):
     out = tmp_path / "out"
     build(source_tree["root"], str(out), split_manifest=source_tree["manifest"])
     text = (out / "TEST_SPLIT_BURNED.md").read_text(encoding="utf-8")
-    assert "BURNED" in text
+    assert "may never be evaluated on this split" in text
+    assert "trained from scratch" in text
     provenance = json.loads((out / "manifests" / "provenance.json").read_text())
-    assert provenance["test_split_status"].startswith("BURNED")
+    assert "2026-07-28 checkpoints" in provenance["test_split_status"]
 
 
 def test_build_flags_images_the_legacy_archive_trained_on(source_tree, tmp_path):

@@ -41,11 +41,16 @@ What it deliberately does not do
 *Invent a fresh test split.* ``grouped_split.json`` records ``num_groups: 68``
 and ``block_size: 40`` but **not** per-file group ids, so the original grouping
 cannot be reproduced exactly from the manifest. :func:`derive_group_id` provides
-a documented *re-derivation* for planning purposes, and every emitted record
-carries it plus a ``trained_on_legacy`` flag, so a replacement test split can be
-selected from the never-trained-on pool as a separate, explicit decision. The
-``test`` split emitted here is the manifest's original one and is **burned** --
-it is written for completeness and lineage, not for evaluation.
+a documented *re-derivation* for diagnostics, and every emitted record carries it
+plus a ``trained_on_legacy`` flag.
+
+Measured on the 2026-07-29 build, a replacement is neither buildable nor needed:
+of the 781 never-trained-on images, 83 of the 89 groups they span also contain a
+trained-on image, leaving 6 images in a fully clean group -- with zero weed
+boxes. And no metric was ever computed on the manifest's test split, so it stays
+valid for any model trained from scratch on this build; only the 2026-07-28
+checkpoints, which trained on part of it, may never be scored against it. See
+``TEST_SPLIT_BURNED.md`` in the output.
 """
 
 from __future__ import annotations
@@ -807,7 +812,11 @@ def _write_outputs(
             "frame // block_size). The source manifest does not store per-file group ids, "
             "so this is not the provenance of the train/valid assignment."
         ),
-        "test_split_status": "BURNED -- see TEST_SPLIT_BURNED.md",
+        "test_split_status": (
+            "VALID for a model trained from scratch on this build; NEVER for the "
+            "2026-07-28 checkpoints, which trained on part of it. "
+            "See TEST_SPLIT_BURNED.md"
+        ),
         "json_sha256": json_hashes,
         "per_split": per_split,
         "manifest_reconciliation": reconciliation,
@@ -837,34 +846,48 @@ def _write_outputs(
 
 
 def _write_burned_notice(out_root: str, per_split: dict[str, dict[str, int]]) -> None:
-    """Write the notice that the manifest's original test split is not usable."""
+    """Write the notice explaining who may and may not evaluate on the test split."""
     trained = per_split["test"].get("trained_on_legacy", 0)
     total = per_split["test"]["images"]
-    text = f"""# The `test` split in this build is BURNED
-
-It is the split named by `grouped_split.json`, rebuilt here for lineage and
-completeness. It is **not** a usable held-out set.
+    text = f"""# The `test` split: usable for a fresh model, not for the 2026-07-28 checkpoints
 
 `RICE_curated_phase2.zip` mis-exported {trained} of these {total} images into its
 train folder, and two phase-2 runs (2026-07-28, both voided) trained on that
-archive. Evaluating any model on this split reports partly-memorized data.
+archive.
 
-## Building a replacement
+But **no metric was ever computed on these images.** No evaluator existed in the
+repository until 2026-07-29 -- checkpoint selection ran on training loss, then
+validation loss. Nothing was tuned, chosen, or reported against this split.
 
-`manifests/split_membership.json` carries, per image:
+Contamination is a property of the **weights**, not the images:
 
-- `trained_on_legacy` — `true` if the image was in the legacy archive's train
-  folder, `false` if it was never trained on, `null` if no legacy archive was
-  passed to the build;
-- `group_id` — a **re-derived** capture-family + frame-block key
-  (`derive_group_id`), not the original grouping, which the source manifest does
-  not record.
+- **The 2026-07-28 checkpoints may never be evaluated on this split.** They
+  memorized {trained} of its images. Both runs are void for other reasons anyway.
+- **A model trained from scratch on this rebuilt dataset may use it normally.**
+  Those weights have never seen it, and no selection decision was informed by it.
 
-A defensible replacement test split selects **whole `group_id` groups** drawn
-only from images with `trained_on_legacy: false`, then removes those groups from
-train and valid. Choosing the grouping rule is a decision to make explicitly and
-record in an ADR, because the original one cannot be reproduced from the
-manifest.
+## Why not build a replacement from the never-trained-on images
+
+`manifests/split_membership.json` carries, per image, `trained_on_legacy` (`true`
+if it was in the legacy archive's train folder, `null` if no legacy archive was
+passed) and `group_id`, a **re-derived** capture-family + frame-block key --
+`grouped_split.json` records `num_groups` and `block_size` but no per-file ids,
+so the original grouping cannot be reproduced.
+
+Measured on the 2026-07-29 build: of the 781 never-trained-on images, 83 of the
+89 groups they span *also* contain a trained-on image, leaving only 6 images in a
+fully clean group -- and those 6 carry zero weed boxes. A group-respecting test
+split drawn from the clean pool is empty in practice. Selecting at the image
+level instead would reintroduce exactly the leakage grouping exists to prevent:
+adjacent frames of one capture sequence in train and test at once.
+
+## What still needs care
+
+- Freeze the operating threshold on validation, then evaluate the test split once.
+- 3 re-derived groups straddle a split boundary, because the source cut video
+  sequences into 40-frame blocks. Guard-band the edges or state the residual.
+- None of this supports a *generalization* claim: the manifest carries no farm,
+  season, device, or illumination metadata. An external set is separate work.
 """
     with open(os.path.join(out_root, "TEST_SPLIT_BURNED.md"), "w", encoding="utf-8") as handle:
         handle.write(text)

@@ -50,7 +50,7 @@ sha256 `2161e0691c5fef43a37274a7331adee7b6267b5032547a7320554804a19fa3ab`.
 |---|---:|---:|---:|---:|---:|---:|
 | train | 1,800 | 59,691 | 52,194 | 7,497 | 83 | 35 |
 | valid | 518 | 15,226 | 13,201 | 2,025 | 34 | 80 |
-| test (**burned**) | 261 | 6,284 | 5,355 | 929 | 25 | 99 |
+| test (see limitations) | 261 | 6,284 | 5,355 | 929 | 25 | 99 |
 | **total** | **2,579** | **81,201** | **70,750** | **10,451** | — | **214** |
 
 Reconciled against the manifest's own `per_split` totals (81,204 source boxes):
@@ -97,12 +97,17 @@ needs nothing from the build machine). Passed on 2026-07-29.
 
 ## Known limitations
 
-**The `test` split is burned.** `RICE_curated_phase2.zip` mis-exported 179 of these
-261 images into its train folder, and the two 2026-07-28 runs trained on it. Do
-not evaluate on it. See `TEST_SPLIT_BURNED.md` in the built tree.
+**The `test` split is usable for a fresh model, not for the 2026-07-28
+checkpoints.** `RICE_curated_phase2.zip` mis-exported 179 of these 261 images into
+its train folder and two voided runs trained on it. But **no metric was ever
+computed on them** — no evaluator existed until 2026-07-29 — so nothing was tuned
+or reported against this split. Contamination is a property of the weights:
+the 2026-07-28 checkpoints may never be scored on it; a model trained from
+scratch on this build may use it normally. (Corrected 2026-07-29; this card first
+said "burned", which was too strong.)
 
-**Never-trained-on pool for a replacement test split** — from
-`trained_on_legacy: false` in `manifests/split_membership.json`:
+**A replacement test split is not buildable from the clean pool.** Measured, not
+assumed. Of the 781 images with `trained_on_legacy: false`:
 
 | Current split | Never trained on | Trained on |
 |---|---:|---:|
@@ -111,16 +116,19 @@ not evaluate on it. See `TEST_SPLIT_BURNED.md` in the built tree.
 | test | 82 | 179 |
 | **total** | **781** | **1,798** |
 
-A defensible replacement selects **whole groups** from those 781 and removes them
-from train/valid. Note the constraint this creates: 781 images is 30% of the
-dataset, and the weed-positive fraction within it has not been checked.
+Those 781 span 89 re-derived groups — but **83 of those groups also contain a
+trained-on image**, leaving only **6** images in a fully clean group, and those 6
+carry **zero weed boxes**. A group-respecting split drawn from the clean pool is
+empty in practice; selecting at the image level instead would reintroduce the
+adjacent-frame leakage grouping exists to prevent. The clean pool's class balance
+matches the whole dataset (6.78:1 rice-to-weed, 51.0% of images weed-bearing
+versus 51.3% overall), so it is representative — it is simply not separable.
 
 **Group ids are re-derived, not original.** `grouped_split.json` records
 `num_groups: 68` and `block_size: 40` but no per-file group ids, so
 `derive_group_id()` reconstructs the *shape* of the key (capture-family stem +
 `frame // 40`) and yields 142 groups across the three splits. It is a diagnostic,
-not the provenance of the existing assignment. Choosing the grouping rule for a
-new split belongs in an ADR.
+not the provenance of the existing assignment.
 
 **Residual block-boundary leakage in the intended split.** 3 re-derived groups
 straddle a split boundary, because 40-frame blocks cut video sequences and
