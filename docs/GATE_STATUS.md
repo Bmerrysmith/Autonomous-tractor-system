@@ -197,12 +197,18 @@ before making a generalization claim.
    clipped **3150 of 3150** steps at 0.5, meaning the effective step size was set
    by the clip and not by the LR schedule, and only the count survived.
 
-## The 2-epoch pilot — exact commands
+## The 2-epoch pilot — how to run it
 
-Needs a GPU; there is none on the dev box, so this runs on the A100. Run both
-arms, same seed, same data, differing only in what the backbone was loaded from.
-`--bn-freeze-scope` is the fail-closed assertion: a partial load aborts here
-rather than quietly freezing fewer layers.
+Needs a GPU; there is none on the dev box, so this runs on the A100.
+
+**Use [`notebooks/weeddet_pilot_colab.ipynb`](../notebooks/weeddet_pilot_colab.ipynb).**
+It pins the checkout, gates on the required trainer flags before spending GPU
+time, runs both arms, and prints the readout. The raw commands below are what it
+drives, recorded here so the pilot can be reproduced without the notebook.
+
+Run both arms, same seed, same data, differing only in what the backbone was
+loaded from. `--bn-freeze-scope` is the fail-closed assertion: a partial load
+aborts here rather than quietly freezing fewer layers.
 
 RiceSEG arm (57 of 58 BN frozen):
 
@@ -226,6 +232,13 @@ settles:**
 | `parity/max_conf_ratio` per epoch | Whether the train/eval BN gap is opening, and from which epoch. If it stays near 1.0, the remaining trainable head BN is not the culprit and GroupNorm is unnecessary |
 | `train/cls_loss_pos` vs `train/cls_loss_neg` | Whether the classifier is learning objects or just learning to say "background". A total that falls while `cls_loss_pos` does not is the failure that a falling loss curve hides |
 | `bn/eval_mode`, `bn/grad_off` | That the freeze actually held for both epochs — observed state, not the value that was requested |
+
+The readout is not left to whoever is reading the file. It exits non-zero if
+either arm warns:
+
+```bash
+python -m agrinav.training.pilot_report checkpoints/pilot_riceseg checkpoints/pilot_imagenet
+```
 
 Do not start the full 18-epoch run until these four have been read.
 
