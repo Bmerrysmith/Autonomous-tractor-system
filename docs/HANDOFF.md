@@ -49,6 +49,17 @@ images never trained on; `manifests/split_membership.json` in the rebuilt datase
 carries a `trained_on_legacy` flag and a re-derived `group_id` per image for
 exactly that purpose.
 
+> **Superseded 2026-07-29 — left in place as the record of what was believed at
+> the time.** "Burned" was too strong. Contamination is a property of the
+> *weights*, not of the images: the 2026-07-28 checkpoints may never be scored on
+> that split, but a model trained from scratch on the rebuilt data has never seen
+> it, and no metric was ever computed on those images (no evaluator existed until
+> 2026-07-29). A replacement split was also measured to be unbuildable as
+> described — of 781 never-trained-on images only 6 sit in a fully clean group,
+> and those 6 carry zero weed boxes. The standing verdict is in
+> [`GATE_STATUS.md`](GATE_STATUS.md), which is the only place a go/no-go is
+> stated.
+
 ### Landed this session, part 2 — the evaluation path exists now
 
 **`agrinav.inference.postprocess` is the one canonical postprocessor** (ADR

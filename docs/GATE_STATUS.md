@@ -1,6 +1,6 @@
 # Gate status — the one authoritative answer to "can I run this?"
 
-**Last updated: 2026-07-30.**
+**Last updated: 2026-07-31.**
 
 This file exists because three documents used to answer the same question three
 different ways: `START_HERE.md` said "do not train the detector yet",
@@ -21,6 +21,8 @@ narrative session log; this is the standing verdict.
 | Phase-1 RiceSEG segmentation pretraining | **DONE, closed** | best mIoU 0.5827 @ ep30, reproduced within 0.001 mIoU. `docs/research/RICESEG_PRETRAIN_RESULTS.md` |
 | Phase-2 detector: pipeline shakedown on the rebuilt dataset | **GO FOR A FRESH RERUN** | the validation-loader batch-size crash is fixed and regression-tested; the two 2026-07-30 attempts stopped before recording epoch 1 and are not usable runs |
 | Phase-2 detector: a run reporting validation AP on the rebuilt split | **GO FOR A FRESH RERUN** | decode is class-aware, the model-to-COCO adapter is wired, validation AP selects the checkpoint (`val_ap_interval`), and validation now uses an explicit positive batch size |
+| Phase-2 detector: a **2-epoch pilot** with the corrected BN freeze + instrumentation | **GO** | freeze scope is fixed and fail-closed (57 of 58 under an injected backbone), and the run now records the gradient-norm distribution, the positive/negative loss split and per-epoch train-vs-eval BN parity. This is the run that produces the evidence for the two open questions below |
+| Phase-2 detector: another **full 18-epoch run** | **NO-GO until the pilot reports** | two unknowns would ride along: `grad_clip=0.5` fired on 3150 of 3150 steps in the 2026-07-30 run, so the clip and not the LR schedule set the step size, and one trainable head BN can still open a train/eval gap. Both are answered by two epochs of `metrics.jsonl`; neither is answered by spending 90 more minutes of A100 time |
 | Phase-2 detector: a headline accuracy claim | **NO-GO** | the baseline harness exists but **no baseline has been run**, so there is still nothing to claim *against*; and no external farm/season set, so nothing supports a generalization claim |
 | Evaluating the **2026-07-28 checkpoints** on the 261-image test split | **NO-GO, permanently** | 231 of its 261 images were inside the archive those runs consumed — 179 as training data, 52 more in the archive's valid folder. Burned *for those weights*. Both runs are void anyway |
 | Evaluating a **freshly trained** checkpoint on that same test split | **GO** | contamination is a property of the weights, not the images. A model trained from scratch on the correctly-rebuilt split has never seen its own test set, and no metric was ever computed on those images — no evaluator existed until 2026-07-29. Corrected 2026-07-29; an earlier note here said "permanently burned", which was too strong |
@@ -100,8 +102,19 @@ before making a generalization claim.
 
 **Still required:**
 
-4. **A decoded-AP overfit gate** on the production construction path, replacing
-   the current `final_loss < initial_loss` check.
+4. ~~**A decoded-AP overfit gate.**~~ Done 2026-07-31. `--overfit` now runs the
+   canonical decode through `evaluate_coco_detections` on the **eval-mode** path
+   over the memorised images and gates on AP50, AR@100 and train-vs-eval-mode
+   confidence parity. `final_loss < initial_loss` is kept only as a secondary
+   condition: it passed for the 2026-07-28 checkpoints, whose loss fell for 14
+   epochs and which then decoded AP 0.0000. Ground truth is subset to the images
+   the run actually kept, or recall would report `N/total` rather than the
+   model's recall. The three thresholds
+   (`--overfit-min-ap50` 0.50, `--overfit-min-recall` 0.50,
+   `--overfit-max-conf-ratio` 3.0) are **provisional smoke floors, not quality
+   standards** — set them from pilot evidence (CLAUDE.md §38). AP50 0.50 sits
+   below the 0.6+ this configuration previously reached on overfit-16; the
+   parity bound comes from the observed ~47x failure (0.9367 vs ~0.02).
 5. ~~**A replacement test split.**~~ Not needed, and not buildable as originally
    described. Measured 2026-07-29: of the 781 never-trained-on images, only **6**
    sit in a re-derived group containing no trained-on image, and those 6 carry
@@ -110,8 +123,58 @@ before making a generalization claim.
    trained from scratch on the rebuilt data, because no metric was ever computed
    on it and contamination lives in the 2026-07-28 weights, which are void.
    Retrain from scratch and use it; do not evaluate the old checkpoints on it.
-6. **Matched BN policy** across the ImageNet/RiceSEG arms (`--bn-policy trainable`
-   on the ImageNet control; `auto` reproduces the old two-factor confound).
+6. **Matched BN policy** across the ImageNet/RiceSEG arms. `auto` reproduces the
+   old two-factor confound; set the policy explicitly on both arms.
+
+   **BatchNorm is currently the top defect, not just a confound.** The
+   2026-07-30 run (correct dataset, correct pin, AP-selected) scored
+   `val/AP 0.0054`. Traced to eval-mode BN statistics, measured on identical
+   weights over a fixed 40-image val subset:
+
+   | condition | AP | AP50 | AR100 |
+   |---|---:|---:|---:|
+   | as-shipped running stats | 0.0000 | 0.0001 | 0.0009 |
+   | batch stats (control, not deployable) | 0.0134 | 0.0713 | 0.0799 |
+   | recalibrated running stats (precise-BN) | 0.0000 | 0.0000 | 0.0004 |
+
+   Recalibration failing is the informative part: the buffers do not merely hold
+   stale values, no fixed statistic reproduces the network's behaviour. That is
+   the small-batch BN failure mode — 58 BN layers at batch 8. Note the control is
+   only AP50 0.071, so BN is necessary but not sufficient; the model is weak even
+   at its best. References: `docs/BIBLIOGRAPHY.md` §2.
+
+   `--bn-policy freeze_pretrained` **was a silent no-op on the RiceSEG arm** until
+   2026-07-31: `build_config` forces `pretrained_backbone=False` whenever
+   `--riceseg-backbone` is used, and that flag was what decided freezing, so it
+   froze **0 of 58** layers while logging that the policy applied. Fixed; a
+   `freeze_pretrained` that freezes nothing now raises, and the frozen/trainable
+   counts are recorded in the run config.
+
+   That first fix took it from 0 to **48 of 58**, which was still wrong. The
+   freeze predicate was the name list `_PRETRAINED_PREFIXES`, which answers "what
+   can torchvision resnet50 weights fill?" — not "what holds loaded statistics?".
+   `load_riceseg_backbone` fills the entire backbone (all 342 `backbone.*`
+   tensors, buffers included, or it raises), so 9 backbone BN layers
+   (`backbone.stem.*`, `backbone.layer1.0.*`) held in-domain statistics and were
+   still being updated from batches of 8. Corrected 2026-07-31: the predicate now
+   reads each module's running buffers (`bn_carries_pretrained_stats`), giving
+   **57 of 58** under an injected backbone and **48 of 58** under ImageNet — both
+   correct, and the two arms legitimately differ because the arms loaded
+   different things. The one layer never frozen is `head.shared.2.seq.3`, the
+   randomly initialised head BN; freezing that would pin it to an identity op.
+   `--bn-freeze-scope` (`imagenet` | `backbone`) makes the expected set a
+   fail-closed assertion, so a partial load aborts instead of quietly freezing
+   fewer layers. The set is resolved **once, before the first step**, and reused:
+   after one epoch a randomly initialised BN no longer looks randomly
+   initialised, so re-deriving it mid-run would sweep the head BN in.
+
+   Open, and the reason a pilot is still needed before a full run: 1 trainable BN
+   remains in the shared head trunk, so a train/eval mode gap can still originate
+   there. Swapping it for GroupNorm is the alternative, deliberately not taken yet
+   — it changes the `state_dict` and breaks compatibility with every existing
+   checkpoint, so it should be an evidence-driven ablation, not a precaution. The
+   per-epoch `parity/*` metrics are what will localise it.
+
 7. **Same-protocol baselines** — the *harness* now exists
    (`agrinav baseline-detector`, `configs/training/baseline_det_control.yaml`):
    stock torchvision `fasterrcnn_resnet50_fpn_v2`, `retinanet_resnet50_fpn_v2`
@@ -121,6 +184,50 @@ before making a generalization claim.
    tensor. **No baseline has been run yet.** Until at least one has, a WeedDet AP
    still has nothing to be measured against. See
    [`docs/baselines.md`](baselines.md).
+
+8. **Instrumentation for the pilot** — added 2026-07-31, observation only. Every
+   epoch now records to `metrics.jsonl`: pre-clip gradient-norm quantiles
+   (`grad_norm/p50|p90|p99|max|clipped_fraction`), the positive vs negative halves
+   of the classification loss (`train/cls_loss_pos`, `train/cls_loss_neg`,
+   summing exactly to `train/cls_loss`), observed BN state (`bn/eval_mode`,
+   `bn/grad_off`, …), and train-mode vs eval-mode peak confidence on 8 fixed
+   unaugmented images (`parity/*`). The probe snapshots and restores every BN
+   buffer, so running it cannot alter training. The gradient-norm distribution is
+   the missing evidence for choosing a real `grad_clip` — the 2026-07-30 run
+   clipped **3150 of 3150** steps at 0.5, meaning the effective step size was set
+   by the clip and not by the LR schedule, and only the count survived.
+
+## The 2-epoch pilot — exact commands
+
+Needs a GPU; there is none on the dev box, so this runs on the A100. Run both
+arms, same seed, same data, differing only in what the backbone was loaded from.
+`--bn-freeze-scope` is the fail-closed assertion: a partial load aborts here
+rather than quietly freezing fewer layers.
+
+RiceSEG arm (57 of 58 BN frozen):
+
+```bash
+python -m agrinav.training.weeddet_train --epochs 2 --bn-policy freeze_pretrained --bn-freeze-scope backbone --riceseg-backbone /content/drive/MyDrive/agrinav_data/out/riceseg_backbone.pth --dump-grad-norms --checkpoint-dir checkpoints/pilot_riceseg
+```
+
+ImageNet control (48 of 58 BN frozen — the arms differ because they loaded
+different things; that is correct, not a confound to be equalised):
+
+```bash
+python -m agrinav.training.weeddet_train --epochs 2 --bn-policy freeze_pretrained --bn-freeze-scope imagenet --dump-grad-norms --checkpoint-dir checkpoints/pilot_imagenet
+```
+
+**What to read out of the two `metrics.jsonl` files, and the decision each one
+settles:**
+
+| Read | Decision |
+|---|---|
+| `grad_norm/p50`, `p90`, `p99`, `clipped_fraction` | Set `grad_clip` at roughly p99 so it catches outliers only. If `clipped_fraction` is again ~1.0 at 0.5, the clip — not the LR schedule — is setting the step size, and the honest fix is to raise it or drop it, not to keep it |
+| `parity/max_conf_ratio` per epoch | Whether the train/eval BN gap is opening, and from which epoch. If it stays near 1.0, the remaining trainable head BN is not the culprit and GroupNorm is unnecessary |
+| `train/cls_loss_pos` vs `train/cls_loss_neg` | Whether the classifier is learning objects or just learning to say "background". A total that falls while `cls_loss_pos` does not is the failure that a falling loss curve hides |
+| `bn/eval_mode`, `bn/grad_off` | That the freeze actually held for both epochs — observed state, not the value that was requested |
+
+Do not start the full 18-epoch run until these four have been read.
 
 ## Standing engineering debt that does not block a shakedown
 

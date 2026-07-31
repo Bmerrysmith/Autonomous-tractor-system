@@ -405,6 +405,28 @@ def test_nonfinite_loss_aborts_with_actionable_message(tmp_path, monkeypatch):
         wd.train_with_progress(_tiny_config(tmp_path, dataset))
 
 
+class _FakeFullBackboneInit:
+    """Stands in for `_RicesegBackboneInit`: fills every backbone BN buffer.
+
+    A callable that loaded nothing no longer suffices. The freeze predicate now
+    asks each BatchNorm whether its running buffers hold loaded statistics rather
+    than matching layer names, so "a backbone was injected" must actually leave
+    statistics behind for `freeze_pretrained` to have anything to freeze.
+    """
+
+    def __call__(self, model):
+        n = 0
+        for name, module in model.named_modules():
+            if not isinstance(module, torch.nn.BatchNorm2d) or not name.startswith("backbone."):
+                continue
+            with torch.no_grad():
+                module.running_mean.fill_(0.37)
+                module.running_var.fill_(1.9)
+                module.num_batches_tracked.fill_(1234)
+            n += 1
+        return n
+
+
 def test_bn_policy_makes_the_ab_single_factor(tmp_path):
     """`bn_policy` decouples BN trainability from which backbone was injected."""
     dataset = _dataset(tmp_path)
@@ -416,9 +438,16 @@ def test_bn_policy_makes_the_ab_single_factor(tmp_path):
         wd, "apply_bn_policy", lambda *a, **k: (calls.append(1), real_policy(*a, **k))[1]
     )
     try:
-        # ImageNet arm with BN forced trainable = the matched control for the
-        # RiceSEG arm, which leaves BN trainable as a side effect.
-        config = _tiny_config(tmp_path, dataset, bn_policy="trainable", num_epochs=1)
+        # Injected-backbone arm with BN forced trainable = the matched control
+        # for the same backbone frozen. Both arms load identical weights, so BN
+        # trainability is the only factor that varies.
+        config = _tiny_config(
+            tmp_path,
+            dataset,
+            bn_policy="trainable",
+            num_epochs=1,
+            backbone_init=_FakeFullBackboneInit(),
+        )
         wd.train_with_progress(config)
         assert calls == [], "bn_policy='trainable' must never freeze BN"
         assert config["bn_policy_resolved"] == "trainable"
@@ -429,11 +458,13 @@ def test_bn_policy_makes_the_ab_single_factor(tmp_path):
             dataset,
             bn_policy="freeze_pretrained",
             num_epochs=1,
+            backbone_init=_FakeFullBackboneInit(),
             checkpoint_dir=str(tmp_path / "ckpt2"),
         )
         wd.train_with_progress(config)
         assert calls, "bn_policy='freeze_pretrained' must apply the BN freeze"
         assert config["bn_policy_resolved"] == "freeze_pretrained"
+        assert config["bn_frozen_layers"] == 57
     finally:
         monkey.undo()
 

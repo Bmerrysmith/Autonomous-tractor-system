@@ -434,22 +434,121 @@ def load_imagenet_backbone(model, verbose=True):
     return len(loadable), len(missed)
 
 
-def apply_bn_policy(model, pretrained_loaded=True, verbose=False):
+def bn_carries_pretrained_stats(module):
+    """True when this BatchNorm's running statistics came from a load, not from init.
+
+    The freeze predicate used to be the *name list* ``_PRETRAINED_PREFIXES``,
+    which encodes one specific fact: which layers ImageNet resnet50 weights can
+    fill. That is the wrong question whenever a different backbone is injected.
+    ``load_riceseg_backbone`` fills the WHOLE backbone (stem and layer1.0
+    included, 342 tensors, buffers among them), so nine backbone BN layers ended
+    up holding in-domain statistics while the name list still called them
+    "random-init" and left them trainable. Measured 2026-07-31: 48 of 57
+    backbone BN frozen under ``--bn-policy freeze_pretrained --riceseg-backbone``.
+
+    Asking the buffers directly answers the question that actually matters —
+    "does this layer hold statistics worth preserving?" — and is correct for any
+    loader, present or future. A freshly constructed BatchNorm2d has
+    ``running_mean == 0``, ``running_var == 1`` and ``num_batches_tracked == 0``;
+    real statistics differ from all three.
+    """
+    if not getattr(module, 'track_running_stats', False):
+        return False
+    if module.running_mean is None or module.running_var is None:
+        return False
+    tracked = getattr(module, 'num_batches_tracked', None)
+    if tracked is not None and int(tracked) > 0:
+        return True
+    return bool(torch.any(module.running_mean != 0) or torch.any(module.running_var != 1))
+
+
+def bn_scope_names(model, scope):
+    """Names of the BatchNorm modules a given freeze `scope` is expected to cover.
+
+    ``'imagenet'``  — the layers torchvision resnet50 weights can fill (48 here).
+    ``'backbone'``  — every BN under ``backbone.`` (57 here), i.e. what a
+                      full-backbone injection such as RiceSEG loads.
+
+    Used only as the fail-closed cross-check against what
+    :func:`bn_carries_pretrained_stats` actually found; it is not the predicate.
+    """
+    if scope not in ('imagenet', 'backbone'):
+        raise ValueError(
+            f"bn scope must be 'imagenet' or 'backbone', got {scope!r}")
+    names = [n for n, m in model.named_modules() if isinstance(m, nn.BatchNorm2d)]
+    if scope == 'backbone':
+        return {n for n in names if n.startswith('backbone.')}
+    return {n for n in names if n.startswith(_PRETRAINED_PREFIXES)}
+
+
+def resolve_bn_freeze_names(model, pretrained_loaded=True, expect_scope=None):
+    """Decide WHICH BatchNorm layers to freeze. Call once, before any training.
+
+    Returns a frozenset of module names, derived from
+    :func:`bn_carries_pretrained_stats`. For an ImageNet warm start that is
+    exactly the 48 layers those weights can fill; for a full injected backbone it
+    is all 57 backbone BN layers, still leaving the randomly initialised head BN
+    (``head.shared.2.seq.3``) trainable.
+
+    MUST be resolved before the first optimizer step, and the result reused for
+    the rest of the run. The predicate reads running buffers, and a *randomly
+    initialised* BN stops looking randomly initialised the moment one training
+    batch updates its statistics — so re-deriving it at epoch 2 would sweep the
+    head BN into the frozen set and pin it to whatever epoch 1 happened to leave
+    there. Caught by test_the_one_trainable_layer_is_the_random_head_bn.
+
+    ``expect_scope`` ('imagenet' | 'backbone' | None) is the fail-closed check:
+    the derived set must equal :func:`bn_scope_names` for that scope, or this
+    raises. Pass the scope implied by whichever loader ran, so a partial or
+    silently-failed load cannot masquerade as a full one.
+    """
+    if not pretrained_loaded:
+        return frozenset()
+    names = frozenset(
+        name for name, m in model.named_modules()
+        if isinstance(m, nn.BatchNorm2d) and bn_carries_pretrained_stats(m))
+    if expect_scope is not None:
+        expected = bn_scope_names(model, expect_scope)
+        if names != expected:
+            missing = sorted(expected - names)
+            extra = sorted(names - expected)
+            raise ValueError(
+                f"BN freeze scope mismatch for expect_scope={expect_scope!r}: found "
+                f"{len(names)} layers holding loaded statistics, expected the "
+                f"{len(expected)} that scope covers. "
+                f"not_frozen={missing[:8]}{'...' if len(missing) > 8 else ''} "
+                f"unexpectedly_frozen={extra[:8]}{'...' if len(extra) > 8 else ''}. "
+                "A layer in scope with init-default running stats means the backbone "
+                "load did not actually fill it — training from here would freeze "
+                "random statistics into a permanent identity op. Fix the load, or "
+                "state the real scope.")
+    return names
+
+
+def apply_bn_policy(model, pretrained_loaded=True, verbose=False, expect_scope=None,
+                    freeze_names=None):
     """
     v6 FIX (F2): freeze BatchNorm ONLY where pretrained running stats exist.
     Randomly-initialised BN (stem, layer1.0, FPN/head) stays trainable —
     freezing BN at random init turns it into a permanent identity op, which
     is what crippled v5 training.
 
+    Pass ``freeze_names`` from :func:`resolve_bn_freeze_names` to apply a set
+    decided earlier; that is what every re-application inside a run must do.
+    Omitting it resolves the set from the model's current buffers, which is only
+    correct before training has started.
+
     IMPORTANT: model.train() re-enables train mode on every BN, so re-apply
     this immediately after EVERY model.train() call (each epoch, and before
     any train-mode val-loss computation).
     """
+    if freeze_names is None:
+        freeze_names = resolve_bn_freeze_names(model, pretrained_loaded, expect_scope)
     frozen = trainable = 0
     for name, m in model.named_modules():
         if not isinstance(m, nn.BatchNorm2d):
             continue
-        if pretrained_loaded and name.startswith(_PRETRAINED_PREFIXES):
+        if name in freeze_names:
             m.eval()
             for p in m.parameters():
                 p.requires_grad = False
@@ -461,8 +560,133 @@ def apply_bn_policy(model, pretrained_loaded=True, verbose=False):
                 p.requires_grad = True
             trainable += 1
     if verbose:
-        print(f'[bn-policy] frozen(pretrained)={frozen}  trainable(random-init)={trainable}')
+        print(f'[bn-policy] frozen(pretrained)={frozen}  trainable(random-init)={trainable}'
+              + (f'  scope={expect_scope} OK' if expect_scope else ''))
     return frozen, trainable
+
+
+def bn_state_report(model):
+    """Observed BN state right now: how many are in eval mode / have grads off.
+
+    ``apply_bn_policy`` reports what it *did*; this reports what the model *is*,
+    which is the number worth logging per epoch. They diverge whenever something
+    calls ``model.train()`` after the policy was applied — the exact failure the
+    per-epoch re-application exists to prevent.
+    """
+    total = eval_mode = grad_off = bb_total = bb_eval = 0
+    for name, m in model.named_modules():
+        if not isinstance(m, nn.BatchNorm2d):
+            continue
+        total += 1
+        in_eval = not m.training
+        eval_mode += int(in_eval)
+        grad_off += int(all(not p.requires_grad for p in m.parameters()))
+        if name.startswith('backbone.'):
+            bb_total += 1
+            bb_eval += int(in_eval)
+    return {
+        'bn/total': total,
+        'bn/eval_mode': eval_mode,
+        'bn/train_mode': total - eval_mode,
+        'bn/grad_off': grad_off,
+        'bn/backbone_total': bb_total,
+        'bn/backbone_eval_mode': bb_eval,
+    }
+
+
+def bn_buffer_snapshot(model):
+    """Clone every BN running buffer, for exact restoration after a train-mode probe.
+
+    A forward pass in train mode *updates* running_mean/running_var/
+    num_batches_tracked on any BN that is not frozen. Any diagnostic that runs
+    the model in train mode is therefore a training change unless the buffers
+    are put back — which is the whole point of :func:`train_eval_confidence_parity`
+    being safe to call from inside a real run.
+    """
+    snap = {}
+    for name, m in model.named_modules():
+        if not isinstance(m, nn.BatchNorm2d) or m.running_mean is None:
+            continue
+        tracked = getattr(m, 'num_batches_tracked', None)
+        snap[name] = (
+            m.running_mean.detach().clone(),
+            m.running_var.detach().clone(),
+            None if tracked is None else tracked.detach().clone(),
+        )
+    return snap
+
+
+def bn_buffer_restore(model, snapshot):
+    """Restore buffers captured by :func:`bn_buffer_snapshot`. Returns count restored."""
+    restored = 0
+    modules = dict(model.named_modules())
+    for name, (mean, var, tracked) in snapshot.items():
+        m = modules.get(name)
+        if m is None or m.running_mean is None:
+            continue
+        with torch.no_grad():
+            m.running_mean.copy_(mean)
+            m.running_var.copy_(var)
+            if tracked is not None and getattr(m, 'num_batches_tracked', None) is not None:
+                m.num_batches_tracked.copy_(tracked)
+        restored += 1
+    return restored
+
+
+def train_eval_confidence_parity(model, images, topk=10, reapply_policy=None):
+    """Top detection confidences under train-mode BN vs eval-mode BN, same images.
+
+    The 2026-07-28 checkpoints scored AP 0.0000 in eval mode but AP 0.0134 /
+    AP50 0.0713 when forced to use batch statistics — the classification head had
+    learned (0.9367 peak confidence under batch stats) and the running statistics
+    were what did not transfer. That gap is the quantity this probe tracks, per
+    epoch, on fixed images, so it is visible *during* a run instead of being
+    reconstructed afterwards.
+
+    Runs under ``no_grad``; snapshots and restores every BN buffer, plus the
+    model's train/eval mode, so calling this cannot alter training. Pass
+    ``reapply_policy`` (a zero-arg callable re-applying the BN freeze) when the
+    run has a freeze policy, so the train-mode leg measures the configuration
+    actually under test rather than an all-BN-trainable one.
+
+    Returns a flat dict of floats; keys are prefixed ``parity/``.
+    """
+    was_training = model.training
+    snapshot = bn_buffer_snapshot(model)
+    try:
+        with torch.no_grad():
+            model.eval()
+            eval_logits, _, _, _ = model._get_logits(images)
+            eval_conf = torch.cat([c.permute(0, 2, 3, 1).reshape(-1)
+                                   for c in eval_logits]).sigmoid()
+
+            model.train()
+            if reapply_policy is not None:
+                reapply_policy()
+            train_logits, _, _, _ = model._get_logits(images)
+            train_conf = torch.cat([c.permute(0, 2, 3, 1).reshape(-1)
+                                    for c in train_logits]).sigmoid()
+
+        k = min(topk, eval_conf.numel(), train_conf.numel())
+        eval_max = float(eval_conf.max())
+        train_max = float(train_conf.max())
+        report = {
+            'parity/eval_max_conf': eval_max,
+            'parity/train_max_conf': train_max,
+            f'parity/eval_mean_top{k}': float(eval_conf.topk(k).values.mean()),
+            f'parity/train_mean_top{k}': float(train_conf.topk(k).values.mean()),
+            'parity/max_conf_gap': train_max - eval_max,
+            # Ratio, not just difference: a 0.94-vs-0.02 gap and a 0.94-vs-0.90
+            # gap are different failures and the difference alone conflates them.
+            'parity/max_conf_ratio': train_max / max(eval_max, 1e-12),
+            'parity/images': int(images.shape[0]) if hasattr(images, 'shape') else len(images),
+        }
+    finally:
+        bn_buffer_restore(model, snapshot)
+        model.train(was_training)
+        if reapply_policy is not None:
+            reapply_policy()
+    return report
 
 
 def all_bn_eval(model):
@@ -668,7 +892,21 @@ class HardTargetFocalLikeLoss(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, return_split=False):
+        """Summed weighted BCE. With ``return_split``, also the positive/negative halves.
+
+        The split is read off the same ``loss * weight`` tensor the gradient uses,
+        so the returned total is bit-identical either way and the two halves sum
+        back to it exactly. Detached and left on device: the caller accumulates
+        and syncs once per epoch rather than once per image.
+
+        Worth watching because this objective's negative term is
+        ``alpha * p^gamma * BCE`` over every non-ignored anchor (~tens of
+        thousands) against a positive term over a handful. If the negative half
+        dominates, "loss went down" can mean "the model learned to predict
+        background everywhere" — which is consistent with a near-zero eval AP
+        alongside a healthy-looking loss curve.
+        """
         p   = pred.sigmoid()
         pos = target > 0
         weight = torch.where(
@@ -677,7 +915,13 @@ class HardTargetFocalLikeLoss(nn.Module):
             self.alpha * p.pow(self.gamma),
         )
         loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
-        return (loss * weight).sum()
+        weighted = loss * weight
+        total = weighted.sum()
+        if not return_split:
+            return total
+        with torch.no_grad():
+            pos_sum = weighted[pos].sum().detach()
+        return total, pos_sum, (total.detach() - pos_sum)
 
 
 # Backwards-compatible alias. The name is historically inaccurate (see the
@@ -859,6 +1103,9 @@ class WeedDetLoss(nn.Module):
 
         total_cls = torch.tensor(0.0, device=anchors.device)
         total_reg = torch.tensor(0.0, device=anchors.device)
+        # Diagnostic only: never added to any returned gradient-carrying term.
+        cls_pos = torch.zeros((), device=anchors.device)
+        cls_neg = torch.zeros((), device=anchors.device)
         num_pos   = 0
 
         for b in range(B):
@@ -867,7 +1114,10 @@ class WeedDetLoss(nn.Module):
             iacs      = torch.zeros(len(anchors), self.num_classes, device=anchors.device)
 
             if len(gt_boxes) == 0:
-                total_cls = total_cls + self.varifocal(cls_flat[b], iacs)
+                cls_b, pos_b, neg_b = self.varifocal(cls_flat[b], iacs, return_split=True)
+                total_cls = total_cls + cls_b
+                cls_pos = cls_pos + pos_b
+                cls_neg = cls_neg + neg_b
                 continue
 
             ious = box_iou(anchors, gt_boxes)
@@ -910,13 +1160,23 @@ class WeedDetLoss(nn.Module):
                 iacs[pos_idx, matched_cls] = target_q
 
             valid     = ~ign
-            total_cls = total_cls + self.varifocal(cls_flat[b][valid], iacs[valid])
+            cls_b, pos_b, neg_b = self.varifocal(
+                cls_flat[b][valid], iacs[valid], return_split=True)
+            total_cls = total_cls + cls_b
+            cls_pos = cls_pos + pos_b
+            cls_neg = cls_neg + neg_b
 
         norm = max(num_pos, 1)
         return {
             'cls_loss'  : total_cls / norm,
             'reg_loss'  : total_reg / norm,
             'total_loss': (total_cls + total_reg) / norm,
+            # Detached diagnostics. Same normaliser as cls_loss, so
+            # cls_loss_pos + cls_loss_neg == cls_loss. Excluded from every
+            # gradient path; the training loop reads them for logging only.
+            'cls_loss_pos': cls_pos / norm,
+            'cls_loss_neg': cls_neg / norm,
+            'num_pos_anchors': torch.tensor(float(num_pos), device=anchors.device),
         }
 
 # ===========================================================================
@@ -1630,11 +1890,56 @@ def train_with_progress(config):
         backbone_init(model)
     elif config.get('pretrained_backbone', True):
         load_imagenet_backbone(model)
+    # A backbone carries pretrained BN statistics if EITHER ImageNet was loaded
+    # OR an in-domain backbone was injected. Passing `pretrained_backbone` alone
+    # conflated "ImageNet was loaded" with "pretrained stats exist", and
+    # build_config forces pretrained_backbone False whenever --riceseg-backbone
+    # is used -- so `--bn-policy freeze_pretrained --riceseg-backbone` froze 0 of
+    # 58 layers while printing that the policy had been applied. Measured
+    # 2026-07-31; defined outside the branch because the epoch loop re-applies it.
+    have_pretrained_stats = bool(
+        backbone_init is not None or config.get('pretrained_backbone', True))
+    # Which layers the freeze is *expected* to cover, derived from whichever
+    # loader actually ran. An injected backbone fills the whole backbone
+    # (load_riceseg_backbone requires every backbone.* tensor or raises), so the
+    # scope is 'backbone' — all 57 BN layers, leaving only the randomly
+    # initialised head BN trainable. ImageNet fills 48 of them. apply_bn_policy
+    # raises if what it froze does not match the declared scope exactly.
+    # `or` rather than a .get default: the key exists with value None in the
+    # training defaults, so .get would return None and skip the derivation.
+    bn_scope = (config.get('bn_freeze_scope')
+                or ('backbone' if backbone_init is not None else 'imagenet'))
+    config['bn_freeze_scope'] = bn_scope
+    bn_frozen = bn_trainable = 0
+    bn_freeze_names = frozenset()
     if bn_freeze:
-        apply_bn_policy(model,
-                        pretrained_loaded=config.get('pretrained_backbone', True),
-                        verbose=True)
-    print(f"[bn-policy] {bn_policy} -> {config['bn_policy_resolved']}")
+        # Resolved once, here, before the first step. Every later re-application
+        # reuses this exact set (see _reapply_bn_policy).
+        bn_freeze_names = resolve_bn_freeze_names(
+            model, pretrained_loaded=have_pretrained_stats, expect_scope=bn_scope)
+        bn_frozen, bn_trainable = apply_bn_policy(
+            model, verbose=True, expect_scope=bn_scope, freeze_names=bn_freeze_names)
+        if bn_policy == 'freeze_pretrained' and bn_frozen == 0:
+            raise ValueError(
+                "bn_policy='freeze_pretrained' froze 0 BatchNorm layers: this model has no "
+                "pretrained backbone to freeze (no --riceseg-backbone and "
+                "pretrained_backbone is False). The run would be identical to "
+                "bn_policy='trainable' while claiming otherwise. Load a backbone, or set "
+                "bn_policy='trainable' to say so explicitly.")
+    config['bn_frozen_layers'] = bn_frozen
+    config['bn_trainable_layers'] = bn_trainable
+    # The names, not just the count: an audit six weeks later needs to know which
+    # layers were held fixed, and re-deriving it from a checkpoint is impossible
+    # once training has moved every BN's buffers off their initial values.
+    config['bn_frozen_layer_names'] = sorted(bn_freeze_names)
+    print(f"[bn-policy] {bn_policy} -> {config['bn_policy_resolved']} "
+          f"(frozen={bn_frozen}, trainable={bn_trainable}, scope={bn_scope})")
+
+    # Re-applying the freeze is needed after every model.train(); binding it once
+    # keeps the epoch loop and the parity probe using the identical resolved set.
+    def _reapply_bn_policy():
+        if bn_freeze:
+            apply_bn_policy(model, freeze_names=bn_freeze_names)
 
     img_size = config.get('img_size', 512)
     train_batch_size = _resolve_batch_size(config, 'batch_size', default=2)
@@ -1646,6 +1951,28 @@ def train_with_progress(config):
         shuffle=True, collate_fn=collate_fn,
         num_workers=config.get('num_workers', 2), pin_memory=True)
     print(f"Train: {len(train_ds)} images | {len(train_loader)} batches/epoch")
+
+    # Fixed probe batch for the per-epoch train/eval BN parity check. Built once,
+    # with augmentation forced off, so the same pixels are compared every epoch
+    # — an augmented probe would confound "confidence moved" with "the crop
+    # changed". Set parity_probe_images to 0 to disable.
+    parity_n = int(config.get('parity_probe_images', 8))
+    probe_images = None
+    if parity_n > 0 and len(train_ds) > 0:
+        prev_augment = getattr(train_ds, 'augment', None)
+        try:
+            if prev_augment is not None:
+                train_ds.augment = False
+            probe_images = torch.stack(
+                [train_ds[i][0] for i in range(min(parity_n, len(train_ds)))])
+        except Exception as exc:   # a probe must never take a training run down
+            print(f'[parity] probe batch unavailable ({exc!r}); parity check disabled')
+            probe_images = None
+        finally:
+            if prev_augment is not None:
+                train_ds.augment = prev_augment
+        if probe_images is not None:
+            print(f'[parity] probe batch: {probe_images.shape[0]} fixed unaugmented images')
 
     optimizer = torch.optim.SGD(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -1789,16 +2116,25 @@ def train_with_progress(config):
     for epoch in epoch_bar:
         model.train()
         # model.train() re-enables train mode on every BN, so the freeze has to
-        # be re-applied each epoch (see apply_bn_policy's docstring).
-        if bn_freeze:
-            apply_bn_policy(model,
-                            pretrained_loaded=config.get('pretrained_backbone', True))
+        # be re-applied each epoch (see apply_bn_policy's docstring). Uses the
+        # same have_pretrained_stats as the initial application -- reading
+        # pretrained_backbone here instead would silently unfreeze the injected
+        # backbone from epoch 1 onward even when the initial call froze it.
+        _reapply_bn_policy()
 
         epoch_loss, n_batches = 0.0, 0
         comp_totals = {}
         epoch_started = time.time()
         clipped_steps = 0
         grad_clip = config.get('grad_clip', 0.5)
+        # Pre-clip gradient norms. clip_grad_norm_ already returns this and the
+        # value was already being read (for clipped_steps), so keeping it costs
+        # nothing. It is the only evidence that can say whether grad_clip=0.5 is
+        # a safety net or a hard cap: the 2026-07-30 run clipped 3150 of 3150
+        # steps across all 14 epochs, meaning the LR schedule was modulating an
+        # already-truncated magnitude and the effective step size was set by the
+        # clip, not by the optimiser.
+        grad_norms = []
 
         for r in range(repeat):  # 2× dataset repeat per epoch (paper)
             batch_iter = (tqdm(enumerate(train_loader),
@@ -1818,7 +2154,12 @@ def train_with_progress(config):
                 optimizer.zero_grad(set_to_none=True)
                 with torch.amp.autocast('cuda', enabled=use_amp):
                     losses = model(imgs, tgts)
-                    loss   = losses.get('total_loss', sum(losses.values()))
+                    # Explicit lookup, not `losses.get(..., sum(losses.values()))`:
+                    # the dict now also carries detached diagnostics, and a
+                    # fallback that summed everything would silently add them to
+                    # the objective. Missing 'total_loss' is a bug, not a case to
+                    # paper over.
+                    loss   = losses['total_loss']
 
                 # A non-finite loss makes avg_loss NaN; `NaN < best_loss` is
                 # False forever, so the run would silently burn every remaining
@@ -1833,7 +2174,9 @@ def train_with_progress(config):
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                if float(total_norm) > grad_clip:
+                unclipped_norm = float(total_norm)   # pre-clip, per torch's contract
+                grad_norms.append(unclipped_norm)
+                if unclipped_norm > grad_clip:
                     clipped_steps += 1
                 prev_scale = scaler.get_scale() if use_amp else None
                 scaler.step(optimizer)
@@ -1870,6 +2213,34 @@ def train_with_progress(config):
 
         avg_loss = epoch_loss / n_batches
         components = {f'train/{k}': v / n_batches for k, v in comp_totals.items()}
+
+        # --- instrumentation (adds no gradient, changes no weight) -------------
+        diagnostics = dict(bn_state_report(model))
+        if grad_norms:
+            norms = torch.tensor(grad_norms)
+            qs = torch.tensor([0.5, 0.9, 0.99])
+            p50, p90, p99 = (float(v) for v in torch.quantile(norms, qs))
+            diagnostics.update({
+                'grad_norm/mean': float(norms.mean()),
+                'grad_norm/p50': p50,
+                'grad_norm/p90': p90,
+                'grad_norm/p99': p99,
+                'grad_norm/max': float(norms.max()),
+                'grad_norm/min': float(norms.min()),
+                'grad_norm/clip_threshold': grad_clip,
+                'grad_norm/clipped_fraction': clipped_steps / max(len(grad_norms), 1),
+            })
+            if config.get('dump_grad_norms', False):
+                dump = os.path.join(ckpt_dir, f'grad_norms_epoch{epoch:03d}.json')
+                with open(dump, 'w', encoding='utf-8') as handle:
+                    json.dump(grad_norms, handle)
+        if probe_images is not None:
+            try:
+                diagnostics.update(train_eval_confidence_parity(
+                    model, probe_images.to(device),
+                    reapply_policy=_reapply_bn_policy if bn_freeze else None))
+            except Exception as exc:
+                print(f'[parity] probe failed at epoch {epoch} ({exc!r}); continuing')
 
         # Held-out metrics, on the network that will actually be saved.
         val_metrics = {}
@@ -1925,6 +2296,7 @@ def train_with_progress(config):
                'wall_s': round(time.time() - epoch_started, 2),
                'select_metric': select_metric, 'select_value': epoch_metric}
         row.update(components)
+        row.update(diagnostics)
         row.update(val_metrics)
         append_metrics_row(ckpt_dir, row)
         history.append(row)

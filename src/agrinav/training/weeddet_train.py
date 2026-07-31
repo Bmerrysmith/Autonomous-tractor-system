@@ -112,6 +112,18 @@ _HARD_DEFAULTS: dict[str, Any] = {
     # 'auto' keeps the historical coupling (freeze BN for ImageNet, trainable
     # for an injected backbone); set explicitly to make the A/B single-factor.
     "bn_policy": "auto",
+    # Fail-closed assertion on WHICH BatchNorm layers the freeze covers. None
+    # derives it from whichever loader ran ('backbone' for an injected backbone,
+    # 'imagenet' otherwise); training aborts on a mismatch. Without this, the
+    # name-list predicate silently froze 48 of 57 backbone BN under
+    # --riceseg-backbone while reporting the policy as applied (2026-07-31).
+    "bn_freeze_scope": None,
+    # Fixed unaugmented images used each epoch for the train-mode vs eval-mode
+    # BatchNorm confidence comparison. 0 disables. Buffers are snapshotted and
+    # restored, so this observes training without altering it.
+    "parity_probe_images": 8,
+    # Write every pre-clip gradient norm, not just the per-epoch quantiles.
+    "dump_grad_norms": False,
     # Full training-state resume. None starts from epoch 1; 'auto' continues from
     # <checkpoint_dir>/weeddet_last.pth when one exists; an explicit path resumes
     # from that file. Every epoch already wrote the optimizer, both schedulers and
@@ -149,6 +161,9 @@ _CLI_TO_CONFIG: dict[str, str] = {
     "val_batch_size": "val_batch_size",
     "val_ap_interval": "val_ap_interval",
     "bn_policy": "bn_policy",
+    "bn_freeze_scope": "bn_freeze_scope",
+    "parity_probe_images": "parity_probe_images",
+    "dump_grad_norms": "dump_grad_norms",
     "resume": "resume",
 }
 
@@ -463,13 +478,44 @@ def run_self_test(img_size: int = 128) -> int:
     return 0
 
 
+def _subset_coco_gt(dataset: Any) -> dict[str, Any]:
+    """In-memory COCO ground truth covering exactly the images a dataset kept.
+
+    ``_CocoSplitDataset(limit=N)`` truncates ``self.images`` and filters
+    ``anns_by_img`` to match, but the file on disk still describes the whole
+    split. Scoring N memorised images against the full annotation file counts
+    every unscored image as a miss, so recall would be pinned near ``N/total``
+    and the gate would measure the subset size rather than the model.
+    """
+    with open(dataset.ann_file, encoding="utf-8") as handle:
+        source = json.load(handle)
+    annotations: list[dict[str, Any]] = []
+    for image in dataset.images:
+        annotations.extend(dataset.anns_by_img.get(image["id"], []))
+    return {
+        "images": list(dataset.images),
+        "annotations": annotations,
+        "categories": source["categories"],
+    }
+
+
 def run_overfit(args: argparse.Namespace) -> int:
-    """Smoke gate: overfit the first N train images and assert the loss drops.
+    """Smoke gate: memorise the first N train images, then score the DECODED output.
 
     ``pretrained_backbone`` stays off unless a CUDA device is present (the ImageNet
     loader fails closed offline). Runs a compact SGD loop that exercises the real
     ``WeedDet`` forward/backward through the injected ``_CocoSplitDataset`` +
-    ``collate_fn``, then asserts final epoch loss < first epoch loss.
+    ``collate_fn``.
+
+    The gate is eval-mode AP50 and recall over the same images, plus train/eval
+    BatchNorm confidence parity — not ``final_loss < initial_loss``. That old
+    condition passed for the 2026-07-28 checkpoints, whose loss fell for 14
+    epochs and which then scored AP 0.0000 / AP50 0.0001 in eval mode: the
+    classification head had learned (0.9367 peak confidence under batch
+    statistics) but the running statistics it was evaluated with had not. A gate
+    that never decodes a box, and never runs the model in the mode it will be
+    deployed in, cannot see that failure. This one runs the real postprocessor
+    through the real COCO evaluator on the real eval path.
     """
     _require_data_args(args)
     if args.overfit <= 0:
@@ -505,7 +551,15 @@ def run_overfit(args: argparse.Namespace) -> int:
     model = _WD.WeedDet(num_classes=len(class_names)).to(device)
     if pretrained:
         _WD.load_imagenet_backbone(model)
-    _WD.apply_bn_policy(model, pretrained_loaded=pretrained)
+    bn_scope = "imagenet" if pretrained else None
+    # Resolved once, before the first step: the predicate reads BN buffers, and
+    # after one epoch a randomly initialised BN no longer looks randomly
+    # initialised.
+    bn_freeze_names = _WD.resolve_bn_freeze_names(
+        model, pretrained_loaded=pretrained, expect_scope=bn_scope
+    )
+    frozen, trainable = _WD.apply_bn_policy(model, freeze_names=bn_freeze_names)
+    print(f"[overfit] bn frozen={frozen} trainable={trainable} scope={bn_scope}")
 
     optimizer = torch.optim.SGD(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -519,12 +573,21 @@ def run_overfit(args: argparse.Namespace) -> int:
         f"device={device.type} | pretrained_backbone={pretrained}"
     )
 
+    def reapply_policy() -> None:
+        _WD.apply_bn_policy(model, freeze_names=bn_freeze_names)
+
+    # Same threshold the real training loop uses, so the clipped-fraction this
+    # prints is evidence about that run and not about a literal local to here.
+    grad_clip = float(getattr(args, "grad_clip", None) or _HARD_DEFAULTS["grad_clip"])
+
     initial_loss: float | None = None
     final_loss = float("nan")
+    grad_norms: list[float] = []
     for epoch in range(1, epochs + 1):
         model.train()
-        _WD.apply_bn_policy(model, pretrained_loaded=pretrained)
+        reapply_policy()
         running, n_batches = 0.0, 0
+        cls_pos = cls_neg = 0.0
         for images, targets in loader:
             if not isinstance(images, torch.Tensor):
                 continue
@@ -534,22 +597,83 @@ def run_overfit(args: argparse.Namespace) -> int:
                 for t in targets
             ]
             optimizer.zero_grad(set_to_none=True)
-            loss = model(images, targets)["total_loss"]
+            losses = model(images, targets)
+            loss = losses["total_loss"]
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+            total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            grad_norms.append(float(total_norm))
             optimizer.step()
             running += float(loss.item())
+            cls_pos += float(losses["cls_loss_pos"])
+            cls_neg += float(losses["cls_loss_neg"])
             n_batches += 1
         avg = running / max(n_batches, 1)
         if initial_loss is None:
             initial_loss = avg
         final_loss = avg
-        print(f"[overfit] epoch {epoch:03d}/{epochs}  avg_loss={avg:.4f}")
+        print(
+            f"[overfit] epoch {epoch:03d}/{epochs}  avg_loss={avg:.4f}  "
+            f"cls_pos={cls_pos / max(n_batches, 1):.4f}  "
+            f"cls_neg={cls_neg / max(n_batches, 1):.4f}"
+        )
 
+    if grad_norms:
+        norms = torch.tensor(grad_norms)
+        p50, p90, p99 = (float(v) for v in torch.quantile(norms, torch.tensor([0.5, 0.9, 0.99])))
+        clipped = float((norms > grad_clip).float().mean())
+        print(
+            f"[overfit] grad_norm p50={p50:.3f} p90={p90:.3f} p99={p99:.3f} "
+            f"max={float(norms.max()):.3f} | clipped {clipped * 100:.1f}% at {grad_clip}"
+        )
+
+    # --- the gate: decoded detections on the eval path, not the loss curve -----
+    from agrinav.evaluation.metrics import evaluate_coco_detections
+    from agrinav.evaluation.runner import predict_split
+
+    # Capped: --overfit accepts any N, and 64 images at 512px is ~200 MB of
+    # activations for a diagnostic. 8 is enough to compare two modes.
+    n_probe = min(len(dataset), max(1, args.parity_probe_images or 8))
+    probe = torch.stack([dataset[i][0] for i in range(n_probe)]).to(device)
+    parity = _WD.train_eval_confidence_parity(model, probe, reapply_policy=reapply_policy)
+
+    detections = predict_split(
+        model, dataset, device=str(device), img_size=img_size, batch_size=batch_size
+    )
+    result = evaluate_coco_detections(_subset_coco_gt(dataset), detections)
+
+    ratio = parity["parity/max_conf_ratio"]
+    print(
+        f"[overfit] decoded: AP={result.ap:.4f} AP50={result.ap50:.4f} "
+        f"AR100={result.ar_100:.4f} dets={result.num_detections} "
+        f"gt={result.num_gt_annotations}"
+    )
+    print(
+        f"[overfit] bn parity: train_max={parity['parity/train_max_conf']:.4f} "
+        f"eval_max={parity['parity/eval_max_conf']:.4f} ratio={ratio:.2f}"
+    )
+
+    failures: list[str] = []
+    if result.ap50 < args.overfit_min_ap50:
+        failures.append(f"AP50 {result.ap50:.4f} < {args.overfit_min_ap50}")
+    if result.ar_100 < args.overfit_min_recall:
+        failures.append(f"AR100 {result.ar_100:.4f} < {args.overfit_min_recall}")
+    if not 1.0 / args.overfit_max_conf_ratio <= ratio <= args.overfit_max_conf_ratio:
+        failures.append(
+            f"train/eval confidence ratio {ratio:.2f} outside "
+            f"[{1.0 / args.overfit_max_conf_ratio:.2f}, {args.overfit_max_conf_ratio:.2f}]"
+        )
+    # Kept as a secondary signal: informative, but on its own it passed a run
+    # that could not decode a single box.
     if initial_loss is None or not (final_loss < initial_loss):
-        print(f"[overfit] FAILED: final {final_loss:.4f} !< initial {initial_loss:.4f}")
+        failures.append(f"loss did not drop ({initial_loss} -> {final_loss})")
+
+    if failures:
+        print("[overfit] FAILED: " + "; ".join(failures))
         return 1
-    print(f"[overfit] PASSED: loss dropped {initial_loss:.4f} -> {final_loss:.4f}")
+    print(
+        f"[overfit] PASSED: AP50={result.ap50:.4f} AR100={result.ar_100:.4f} "
+        f"conf_ratio={ratio:.2f} loss {initial_loss:.4f} -> {final_loss:.4f}"
+    )
     return 0
 
 
@@ -721,6 +845,59 @@ def _build_parser() -> argparse.ArgumentParser:
         "explicitly to keep an ImageNet-vs-RiceSEG A/B single-factor",
     )
     parser.add_argument(
+        "--bn-freeze-scope",
+        default=None,
+        choices=("imagenet", "backbone"),
+        help="which BatchNorm layers 'freeze_pretrained' must cover, as a "
+        "fail-closed assertion. Defaults to 'backbone' (all 57 backbone BN) when "
+        "--riceseg-backbone injects a full backbone, 'imagenet' (48) otherwise. "
+        "Training aborts if the layers actually holding loaded statistics do not "
+        "match, rather than silently freezing fewer",
+    )
+    parser.add_argument(
+        "--parity-probe-images",
+        type=int,
+        default=None,
+        help="fixed unaugmented images used each epoch to compare train-mode vs "
+        "eval-mode BatchNorm confidence (default: 8; 0 disables). Costs two "
+        "no-grad forwards per epoch and restores every BN buffer afterwards",
+    )
+    parser.add_argument(
+        "--dump-grad-norms",
+        action="store_true",
+        # default=None, not False: _cli_overrides applies any non-None value, so
+        # a plain False would override a YAML `dump_grad_norms: true`.
+        default=None,
+        help="also write the full per-step pre-clip gradient norms to "
+        "<checkpoint-dir>/grad_norms_epochNNN.json (quantiles always go to "
+        "metrics.jsonl)",
+    )
+    parser.add_argument(
+        "--overfit-min-ap50",
+        type=float,
+        default=0.50,
+        help="PROVISIONAL gate for --overfit: minimum eval-mode AP50 on the "
+        "memorised images. 0.50 is set below the 0.6+ this configuration reached "
+        "on overfit-16 under hard classification targets; it is a smoke floor, "
+        "not a quality standard, and should be re-set from pilot evidence",
+    )
+    parser.add_argument(
+        "--overfit-min-recall",
+        type=float,
+        default=0.50,
+        help="PROVISIONAL gate for --overfit: minimum eval-mode AR@100. Separate "
+        "from AP50 because a model can score decently on the few boxes it does "
+        "emit while missing most objects",
+    )
+    parser.add_argument(
+        "--overfit-max-conf-ratio",
+        type=float,
+        default=3.0,
+        help="PROVISIONAL gate for --overfit: max train-mode/eval-mode peak "
+        "confidence ratio (checked in both directions). The 2026-07-28 failure "
+        "sat near 47x (0.9367 vs ~0.02); a memorised set should be near 1x",
+    )
+    parser.add_argument(
         "--resume",
         default=None,
         metavar="PATH|auto",
@@ -789,7 +966,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         metavar="N",
-        help="overfit the first N train images and assert the loss drops (smoke gate)",
+        help=(
+            "memorise the first N train images, then gate on decoded eval-mode "
+            "detections over those same images: AP50, AR@100 and train-vs-eval "
+            "BN confidence parity (see the --overfit-* thresholds). A falling "
+            "loss is checked too, but only as a secondary signal — it passed for "
+            "checkpoints that then decoded AP 0.0000"
+        ),
     )
     return parser
 
