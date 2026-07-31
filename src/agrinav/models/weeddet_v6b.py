@@ -1441,6 +1441,110 @@ def append_metrics_row(ckpt_dir, row):
     return path
 
 
+def _restore_training_state(ckpt_path, *, model, ema, optimizer, lr_scheduler, warmup,
+                            scaler, select_metric, config, ckpt_dir, log=print):
+    """Reload a full training state from a checkpoint and say where to continue.
+
+    Restores the online weights, the EMA copy, the optimizer, both schedulers and
+    the AMP scaler, so the resumed run is a continuation rather than a second run
+    that happens to start from good weights. The learning-rate schedule in
+    particular is stateful: without ``warmup`` and ``lr_scheduler`` the LR would
+    restart at the top of the cosine and undo the epochs already paid for.
+
+    Fails closed on any mismatch that would make the resumed run a *different*
+    experiment: a different class map, a different class count, or a different
+    checkpoint-selection metric. Silently resuming across those would produce a
+    run whose ``best`` checkpoint was chosen by two different rules.
+
+    Args:
+        ckpt_path: file written by a previous run (``weeddet_last.pth``).
+        model: the online model. Receives ``raw_state_dict``.
+        ema: ``ModelEMA`` or None. Receives ``state_dict`` (the EMA weights).
+        optimizer, lr_scheduler, warmup: restored in place.
+        scaler: ``GradScaler`` when AMP is on, else None.
+        select_metric: this run's selection metric; must match the checkpoint's.
+        config: run config, for the class-map comparison.
+        ckpt_dir: used to recover ``best_epoch`` from a previous ``status.json``.
+        log: where to write the summary.
+
+    Returns:
+        ``(start_epoch, global_step, best_metric_value, best_epoch)``.
+
+    Raises:
+        FileNotFoundError: the checkpoint does not exist.
+        ValueError: the checkpoint is incompatible with this run's configuration.
+    """
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(
+            f"--resume {ckpt_path!r} does not exist. Pass 'auto' to continue from "
+            f"<checkpoint-dir>/weeddet_last.pth when one is present, or omit --resume "
+            "to start from epoch 1.")
+
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+
+    ckpt_metric = ckpt.get('best_metric_name')
+    if ckpt_metric and ckpt_metric != select_metric:
+        raise ValueError(
+            f"{ckpt_path!r} selected checkpoints on {ckpt_metric!r} but this run selects on "
+            f"{select_metric!r}. Resuming would carry a best-metric value that the two rules "
+            "do not agree on. Match the val/AP configuration of the original run, or start "
+            "a fresh run.")
+
+    ckpt_classes = list(ckpt.get('class_names') or [])
+    run_classes = list(config.get('class_names') or [])
+    if ckpt_classes and run_classes and ckpt_classes != run_classes:
+        raise ValueError(
+            f"class map mismatch: checkpoint {ckpt_classes} vs run {run_classes}. The class "
+            "index order decides what every saved logit means; resuming across it would "
+            "silently relabel the model.")
+    ckpt_num = ckpt.get('num_classes')
+    run_num = config.get('num_classes')
+    if ckpt_num is not None and run_num is not None and int(ckpt_num) != int(run_num):
+        raise ValueError(
+            f"num_classes mismatch: checkpoint {ckpt_num} vs run {run_num}.")
+
+    # raw_state_dict is the online model; state_dict is the EMA (or the online
+    # model when EMA was off). Loading the EMA weights into `model` would resume
+    # training from the smoothed copy -- a different trajectory.
+    raw = ckpt.get('raw_state_dict') or ckpt['state_dict']
+    model.load_state_dict(raw, strict=True)
+    if ema is not None:
+        ema.ema.load_state_dict(ckpt['state_dict'], strict=True)
+
+    optimizer.load_state_dict(ckpt['optimizer'])
+    if ckpt.get('scheduler') is not None:
+        lr_scheduler.load_state_dict(ckpt['scheduler'])
+    if ckpt.get('warmup') is not None:
+        warmup.load_state_dict(ckpt['warmup'])
+    if scaler is not None and ckpt.get('scaler') is not None:
+        scaler.load_state_dict(ckpt['scaler'])
+
+    finished_epoch = int(ckpt.get('epoch', 0))
+    global_step = int(ckpt.get('global_step', 0))
+    best_value = ckpt.get('best_metric_value')
+    best_value = float(best_value) if best_value is not None else None
+
+    # best_epoch is not in the checkpoint payload; a previous status.json has it.
+    best_epoch = 0
+    status_path = os.path.join(ckpt_dir, 'status.json')
+    if os.path.isfile(status_path):
+        try:
+            with open(status_path, encoding='utf-8') as handle:
+                best_epoch = int(json.load(handle).get('best_epoch', 0) or 0)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            log(f"[resume] could not read best_epoch from {status_path}: {exc}")
+
+    log(f"[resume] {ckpt_path}")
+    log(f"[resume] finished epoch {finished_epoch}, global_step {global_step}; "
+        f"continuing at epoch {finished_epoch + 1}")
+    log(f"[resume] carried forward best {select_metric}="
+        f"{'none' if best_value is None else f'{best_value:.4f}'} "
+        f"from epoch {best_epoch or 'unknown'}"
+        + ("" if ema is not None else "  (no EMA in this run)"))
+    log(f"[resume] lr resumes at {optimizer.param_groups[0]['lr']:.6f}")
+    return finished_epoch + 1, global_step, best_value, best_epoch
+
+
 @torch.no_grad()
 def evaluate_val_loss(model, loader, device):
     """Mean loss over ``loader`` in eval mode. Returns ``{}`` for an empty loader.
@@ -1640,9 +1744,47 @@ def train_with_progress(config):
     skipped_batches = 0
     amp_skipped_steps = 0
     completed_epochs = 0
+    start_epoch = 1
 
-    epoch_bar = (tqdm(range(1, num_epochs + 1), desc='Epochs', mininterval=bar_interval)
-                 if show_bars else range(1, num_epochs + 1))
+    # Resume. A Colab VM being reclaimed mid-epoch used to cost the entire run:
+    # every piece of state needed to continue was already being written into
+    # weeddet_last.pth each epoch, and nothing ever read it back. The 2026-07-30
+    # run died at batch 224/225 of epoch 15 with 14 good epochs on disk.
+    resume_from = config.get('resume')
+    if resume_from:
+        if resume_from == 'auto':
+            candidate = os.path.join(ckpt_dir, 'weeddet_last.pth')
+            resume_from = candidate if os.path.isfile(candidate) else None
+            if resume_from is None:
+                _log(f"[resume] auto: no weeddet_last.pth in {ckpt_dir}; starting from epoch 1")
+        if resume_from:
+            start_epoch, global_step, restored_best, best_epoch = _restore_training_state(
+                resume_from,
+                model=model,
+                ema=ema,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                warmup=warmup,
+                scaler=scaler if use_amp else None,
+                select_metric=select_metric,
+                config=config,
+                ckpt_dir=ckpt_dir,
+                log=_log,
+            )
+            # None means the previous run never recorded a best; keep this run's
+            # sentinel so the first completed epoch can legitimately win.
+            if restored_best is not None:
+                best_loss = restored_best
+            if start_epoch > num_epochs:
+                raise ValueError(
+                    f"{resume_from!r} already finished epoch {start_epoch - 1} of "
+                    f"num_epochs={num_epochs}. Raise num_epochs to continue training, or "
+                    "point --checkpoint-dir at a fresh directory to start over.")
+            completed_epochs = start_epoch - 1
+
+    epoch_range = range(start_epoch, num_epochs + 1)
+    epoch_bar = (tqdm(epoch_range, desc='Epochs', mininterval=bar_interval)
+                 if show_bars else epoch_range)
 
     for epoch in epoch_bar:
         model.train()

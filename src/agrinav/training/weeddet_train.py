@@ -112,6 +112,12 @@ _HARD_DEFAULTS: dict[str, Any] = {
     # 'auto' keeps the historical coupling (freeze BN for ImageNet, trainable
     # for an injected backbone); set explicitly to make the A/B single-factor.
     "bn_policy": "auto",
+    # Full training-state resume. None starts from epoch 1; 'auto' continues from
+    # <checkpoint_dir>/weeddet_last.pth when one exists; an explicit path resumes
+    # from that file. Every epoch already wrote the optimizer, both schedulers and
+    # the AMP scaler -- nothing read them back, so a reclaimed Colab VM cost the
+    # whole run (2026-07-30: killed at batch 224/225 of epoch 15, 14 epochs lost).
+    "resume": None,
     # Progress-bar redraw interval, seconds. Bars previously redrew every batch
     # and flooded the Colab cell with ~424k characters.
     "progress_interval": 2.0,
@@ -143,6 +149,7 @@ _CLI_TO_CONFIG: dict[str, str] = {
     "val_batch_size": "val_batch_size",
     "val_ap_interval": "val_ap_interval",
     "bn_policy": "bn_policy",
+    "resume": "resume",
 }
 
 
@@ -712,6 +719,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="BatchNorm treatment. 'auto' (default) freezes BN where ImageNet "
         "stats exist and leaves it trainable for an injected backbone; set it "
         "explicitly to keep an ImageNet-vs-RiceSEG A/B single-factor",
+    )
+    parser.add_argument(
+        "--resume",
+        default=None,
+        metavar="PATH|auto",
+        help="continue a previous run: restores model, EMA, optimizer, both LR "
+        "schedulers and the AMP scaler, and starts at the next epoch. 'auto' uses "
+        "<checkpoint-dir>/weeddet_last.pth when present and starts from scratch "
+        "otherwise. Refuses to resume across a different class map or a different "
+        "checkpoint-selection metric. This is NOT --riceseg-backbone (weights only, "
+        "fresh optimizer) -- the two modes are deliberately separate",
     )
     parser.add_argument(
         "--class-names",
