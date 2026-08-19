@@ -22,6 +22,8 @@ from agrinav.models import weeddet_v6b as wd
 from agrinav.training.weeddet_train import (
     DEFAULT_CLASS_NAMES,
     _CocoSplitDataset,
+    _HARD_DEFAULTS,
+    _build_parser,
     _make_riceseg_backbone_init,
     build_config,
     load_checkpoint_model,
@@ -367,3 +369,43 @@ def test_backbone_seam_toggles_apply_bn_policy_exactly(tmp_path, monkeypatch):
         }
     )
     assert calls == [], "an injected in-domain backbone must never be BN-frozen"
+
+
+def _grad_clip_args(tmp_path, **extra):
+    ann_file, images_root = _write_synthetic_split(str(tmp_path))
+    return argparse.Namespace(
+        ann_file=ann_file,
+        images_root=images_root,
+        config=None,
+        no_pretrained_backbone=True,
+        **extra,
+    )
+
+
+def test_grad_clip_flag_reaches_the_config(tmp_path):
+    """--grad-clip must override the 0.5 hard default in the full-run config.
+
+    Regression: the flag did not exist, so ``grad_clip`` was unreachable from the
+    CLI even though it is the value the pilot exists to choose. Measured pre-clip
+    norms on this model run 65-120, so the 0.5 default truncates every step by
+    roughly 130x and the clip, not the LR schedule, sets the step size.
+    """
+    cfg = build_config(_grad_clip_args(tmp_path, grad_clip=96.0))
+    assert cfg["grad_clip"] == 96.0
+
+
+def test_grad_clip_defaults_to_the_hard_default_when_unset(tmp_path):
+    cfg = build_config(_grad_clip_args(tmp_path, grad_clip=None))
+    assert cfg["grad_clip"] == _HARD_DEFAULTS["grad_clip"]
+
+
+def test_grad_clip_zero_survives_the_merge_as_zero(tmp_path):
+    """0 means "disable clipping"; it must not fall back to 0.5 via truthiness."""
+    cfg = build_config(_grad_clip_args(tmp_path, grad_clip=0.0))
+    assert cfg["grad_clip"] == 0.0
+
+
+def test_grad_clip_flag_is_exposed_on_the_parser():
+    args = _build_parser().parse_args(["--grad-clip", "96"])
+    assert args.grad_clip == 96.0
+    assert _build_parser().parse_args([]).grad_clip is None

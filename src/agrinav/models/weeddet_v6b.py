@@ -2173,10 +2173,13 @@ def train_with_progress(config):
 
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                # grad_clip <= 0 means "do not clip". inf still returns the true
+                # pre-clip norm, so the recorded distribution is unaffected.
+                clip_norm = grad_clip if grad_clip and grad_clip > 0 else float('inf')
+                total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 unclipped_norm = float(total_norm)   # pre-clip, per torch's contract
                 grad_norms.append(unclipped_norm)
-                if unclipped_norm > grad_clip:
+                if unclipped_norm > clip_norm:
                     clipped_steps += 1
                 prev_scale = scaler.get_scale() if use_amp else None
                 scaler.step(optimizer)

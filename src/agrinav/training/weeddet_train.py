@@ -164,6 +164,7 @@ _CLI_TO_CONFIG: dict[str, str] = {
     "bn_freeze_scope": "bn_freeze_scope",
     "parity_probe_images": "parity_probe_images",
     "dump_grad_norms": "dump_grad_norms",
+    "grad_clip": "grad_clip",
     "resume": "resume",
 }
 
@@ -578,7 +579,15 @@ def run_overfit(args: argparse.Namespace) -> int:
 
     # Same threshold the real training loop uses, so the clipped-fraction this
     # prints is evidence about that run and not about a literal local to here.
-    grad_clip = float(getattr(args, "grad_clip", None) or _HARD_DEFAULTS["grad_clip"])
+    # `or` would send an explicit --grad-clip 0 (meaning "disable") back to the
+    # 0.5 default, so test for None rather than falsiness.
+    _requested_clip = getattr(args, "grad_clip", None)
+    if _requested_clip is None:
+        _requested_clip = _HARD_DEFAULTS["grad_clip"]
+    grad_clip = float(_requested_clip)
+    # A non-positive clip means "do not clip". inf keeps clip_grad_norm_'s return
+    # value -- the true pre-clip norm -- so the distribution is still recorded.
+    clip_norm = grad_clip if grad_clip > 0 else float("inf")
 
     initial_loss: float | None = None
     final_loss = float("nan")
@@ -600,7 +609,7 @@ def run_overfit(args: argparse.Namespace) -> int:
             losses = model(images, targets)
             loss = losses["total_loss"]
             loss.backward()
-            total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
             grad_norms.append(float(total_norm))
             optimizer.step()
             running += float(loss.item())
@@ -620,10 +629,11 @@ def run_overfit(args: argparse.Namespace) -> int:
     if grad_norms:
         norms = torch.tensor(grad_norms)
         p50, p90, p99 = (float(v) for v in torch.quantile(norms, torch.tensor([0.5, 0.9, 0.99])))
-        clipped = float((norms > grad_clip).float().mean())
+        clipped = float((norms > clip_norm).float().mean())
         print(
             f"[overfit] grad_norm p50={p50:.3f} p90={p90:.3f} p99={p99:.3f} "
-            f"max={float(norms.max()):.3f} | clipped {clipped * 100:.1f}% at {grad_clip}"
+            f"max={float(norms.max()):.3f} | clipped {clipped * 100:.1f}% at "
+            f"{grad_clip if grad_clip > 0 else 'disabled'}"
         )
 
     # --- the gate: decoded detections on the eval path, not the loss curve -----
@@ -921,6 +931,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=None, help="training epochs (default: 12)")
     parser.add_argument(
         "--base-lr", type=float, default=None, help="SGD base learning rate (default: 0.001)"
+    )
+    parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=None,
+        help="gradient-norm clip (default: 0.5). Pass 0 or a negative value to "
+        "disable clipping entirely while still recording the norms. The default "
+        "is not a safety net on this model: measured pre-clip norms run 65-120, "
+        "so 0.5 truncates every step by ~130x and the clip, not the LR schedule, "
+        "sets the effective step size.",
     )
     parser.add_argument(
         "--checkpoint-dir",
