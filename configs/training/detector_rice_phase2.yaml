@@ -55,7 +55,26 @@ save_every: 4
 repeat_factor: 1            # 1798 train images is already a real epoch
 min_lr: 0.00001             # cosine floor
 warmup_factor: 0.001        # LR multiplier at warmup start
-grad_clip: 0.5              # gradient-norm clip
+# Gradient-norm clip. 40 sits just above the largest norm seen in 900 measured
+# steps, so it binds on nothing observed and the LR schedule -- not the clip --
+# sets the step size on both arms. It remains a guard against a genuine
+# explosion.
+#
+# Was 0.5, which fired on 100% of steps in every run ever recorded here. Measured
+# in pilot_20260819_180855 (2 epochs, batch 8, AMP, A100), pre-clip norms over
+# 450 steps per arm:
+#   riceseg  p50 5.377  p90  6.872  p99 10.538  max 13.996   (1 non-finite)
+#   imagenet p50 8.207  p90 18.079  p99 32.907  max 39.667   (3 non-finite)
+# At 0.5 that is a 10-16x truncation at the median and up to 80x at the tail.
+#
+# Not set to the production arm's p99 (10.5) on purpose: that would clip ~1% of
+# RiceSEG steps but ~25% of ImageNet steps, making the control's effective step
+# size a function of the clip and reintroducing a confound into the very
+# comparison the two-arm pilot exists to make.
+#
+# Two epochs is a small sample and the cosine schedule changes the dynamics --
+# re-read grad_norm/p99 and grad_norm/non_finite_steps after the 18-epoch run.
+grad_clip: 40.0
 
 # --- regularisation / speed ---
 augment: true               # geometric + photometric augmentation (label-aligned)
