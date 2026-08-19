@@ -22,7 +22,7 @@ narrative session log; this is the standing verdict.
 | Phase-2 detector: pipeline shakedown on the rebuilt dataset | **GO FOR A FRESH RERUN** | the validation-loader batch-size crash is fixed and regression-tested; the two 2026-07-30 attempts stopped before recording epoch 1 and are not usable runs |
 | Phase-2 detector: a run reporting validation AP on the rebuilt split | **GO FOR A FRESH RERUN** | decode is class-aware, the model-to-COCO adapter is wired, validation AP selects the checkpoint (`val_ap_interval`), and validation now uses an explicit positive batch size |
 | Phase-2 detector: a **2-epoch pilot** with the corrected BN freeze + instrumentation | **GO** | freeze scope is fixed and fail-closed (57 of 58 under an injected backbone), and the run now records the gradient-norm distribution, the positive/negative loss split and per-epoch train-vs-eval BN parity. This is the run that produces the evidence for the two open questions below |
-| Phase-2 detector: another **full 18-epoch run** | **NO-GO until the pilot reports** | two unknowns would ride along: `grad_clip=0.5` fired on 3150 of 3150 steps in the 2026-07-30 run, so the clip and not the LR schedule set the step size, and one trainable head BN can still open a train/eval gap. Both are answered by two epochs of `metrics.jsonl`; neither is answered by spending 90 more minutes of A100 time |
+| Phase-2 detector: another **full 18-epoch run** | **GO**, once the config change below is on the branch the notebook pins | the pilot reported on 2026-08-19 (`pilot_20260819_180855`). Both unknowns are resolved: `grad_clip` is raised from 0.5 to 40.0 on measured evidence, and the train/eval BN gap did not open (parity 0.84→0.88 RiceSEG, 0.71→0.75 ImageNet). See the pilot section below |
 | Phase-2 detector: a headline accuracy claim | **NO-GO** | the baseline harness exists but **no baseline has been run**, so there is still nothing to claim *against*; and no external farm/season set, so nothing supports a generalization claim |
 | Evaluating the **2026-07-28 checkpoints** on the 261-image test split | **NO-GO, permanently** | 231 of its 261 images were inside the archive those runs consumed — 179 as training data, 52 more in the archive's valid folder. Burned *for those weights*. Both runs are void anyway |
 | Evaluating a **freshly trained** checkpoint on that same test split | **GO** | contamination is a property of the weights, not the images. A model trained from scratch on the correctly-rebuilt split has never seen its own test set, and no metric was ever computed on those images — no evaluator existed until 2026-07-29. Corrected 2026-07-29; an earlier note here said "permanently burned", which was too strong |
@@ -241,6 +241,62 @@ python -m agrinav.training.pilot_report checkpoints/pilot_riceseg checkpoints/pi
 ```
 
 Do not start the full 18-epoch run until these four have been read.
+
+## The 2-epoch pilot reported — 2026-08-19
+
+`pilot_20260819_180855` (A100, torch 2.11.0+cu128, both arms exit 0, 2 epochs,
+450 steps each, seed 42, archive sha256 `40eb6370…`). Readout:
+`rice_phase2_v2/pilots/pilot_20260819_180855/pilot_readout.txt`.
+
+**1. `grad_clip` was the defect.** It fired on **100% of steps in both arms**.
+Pre-clip norms, pooled over all 450 steps per arm:
+
+| Arm | p50 | p90 | p99 | p99.9 | max | non-finite |
+|---|---:|---:|---:|---:|---:|---:|
+| riceseg | 5.377 | 6.872 | 10.538 | 13.837 | 13.996 | 1 |
+| imagenet | 8.207 | 18.079 | 32.907 | 39.271 | 39.667 | 3 |
+
+At `grad_clip: 0.5` that is a 10-16x truncation at the median and up to 80x at
+the tail: the clip, not the cosine schedule, set every step size in every run
+this project has recorded. **Raised to 40.0** in
+`configs/training/detector_rice_phase2.yaml`, just above the largest of the 900
+measured norms, so it binds on nothing observed while still catching an
+explosion. Deliberately *not* set to the production arm's p99 (10.5) — that
+would clip ~1% of RiceSEG steps but ~25% of ImageNet steps and make the control's
+effective step size a function of the clip.
+
+`configs/training/baseline_det_control.yaml` still carries `grad_clip: 0.5` and is
+**unmeasured** — torchvision's reference recipe does not clip at all. Measure it
+before the first baseline run rather than copying 40.0 across; tuning a baseline
+to the candidate's recipe is the failure this harness exists to avoid.
+
+**2. BatchNorm is cleared.** The freeze held exactly as specified — RiceSEG
+57 of 58 (`backbone_eval_mode=57/57`), ImageNet 48 of 58 — and the train/eval
+parity ratio did not open a gap (0.84→0.88 and 0.71→0.75, both inside the
+[0.33, 3.00] bound and trending toward 1.0). **The GroupNorm swap is not
+indicated** and item 6's "BatchNorm is currently the top defect" no longer holds:
+those measurements were taken on weights from a run that was itself throttled
+~25x, so the running statistics described a network that had barely trained. BN
+was a symptom, not the cause.
+
+**3. The classifier is learning objects, not background.** `cls_loss_pos` fell in
+both arms while `cls_loss_neg` rose modestly, which is the correct signature.
+
+**4. The RiceSEG warm-start is doing measurable work.** `cls_loss_pos` fell
+3.1069 → 1.5294 (−50.8%) on the RiceSEG arm against 3.5442 → 2.6234 (−26.0%) on
+the ImageNet control, and the RiceSEG arm's gradient distribution is both lower
+and tighter (max 13.996 vs 39.667). Two epochs, one seed — **directional only,
+not a result.**
+
+**Instrumentation bug found and fixed by this pilot.** The ImageNet arm's
+recommendation printed `nan`. Under AMP, `scaler.unscale_` yields inf/NaN norms
+on the steps `GradScaler` then skips (1 and 3 steps here, normal calibration);
+those reached `torch.quantile`, and `_series` did not filter them because NaN is
+a float. `max()` ordering then decided whether an arm got a number or `nan` —
+the printed 12.74 was the RiceSEG arm's worst-epoch p99, and the ImageNet arm's
+true p99 of 32.907 was silently dropped, understating the correct clip by ~3x.
+Both call sites now filter non-finite values, and `grad_norm/non_finite_steps` is
+recorded per epoch.
 
 ## Standing engineering debt that does not block a shakedown
 
