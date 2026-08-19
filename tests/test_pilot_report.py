@@ -288,3 +288,34 @@ def test_the_cli_reads_both_arms_in_one_invocation(
     out = capsys.readouterr().out
 
     assert "pilot_riceseg" in out and "pilot_imagenet" in out
+
+
+def test_series_skips_non_finite_so_a_nan_epoch_cannot_poison_the_advice():
+    """One AMP-overflow epoch must not turn the grad_clip advice into NaN.
+
+    Regression from the 2026-08-19 pilot: the ImageNet arm recommended `nan`
+    while the RiceSEG arm recommended 12.74 from the same code path. NaN passes
+    `isinstance(x, float)`, so it reached `max(...)`, where the result depends on
+    list order.
+    """
+    from agrinav.training.pilot_report import _series, recommend_grad_clip
+
+    rows = [
+        {"grad_norm/p99": float("nan"), "grad_norm/clipped_fraction": 1.0,
+         "grad_norm/clip_threshold": 0.5},
+        {"grad_norm/p99": 12.74, "grad_norm/clipped_fraction": 1.0,
+         "grad_norm/clip_threshold": 0.5},
+    ]
+    assert _series(rows, "grad_norm/p99") == [12.74]
+
+    advice = recommend_grad_clip(rows)
+    assert advice.worst_p99 == 12.74
+    assert "nan" not in advice.verdict.lower()
+
+
+def test_series_skips_non_finite_regardless_of_order():
+    from agrinav.training.pilot_report import _series
+
+    for tail in (float("inf"), float("-inf"), float("nan")):
+        assert _series([{"k": 3.0}, {"k": tail}], "k") == [3.0]
+        assert _series([{"k": tail}, {"k": 3.0}], "k") == [3.0]

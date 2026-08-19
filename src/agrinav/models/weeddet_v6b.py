@@ -2221,15 +2221,26 @@ def train_with_progress(config):
         diagnostics = dict(bn_state_report(model))
         if grad_norms:
             norms = torch.tensor(grad_norms)
-            qs = torch.tensor([0.5, 0.9, 0.99])
-            p50, p90, p99 = (float(v) for v in torch.quantile(norms, qs))
+            # AMP deliberately overflows to calibrate the loss scale, and
+            # scaler.unscale_ turns those steps into inf/NaN norms before
+            # GradScaler skips them. Leaving them in makes torch.quantile return
+            # NaN for the whole epoch, which then propagates into the grad_clip
+            # recommendation as a silent NaN rather than an error.
+            finite = norms[torch.isfinite(norms)]
+            n_non_finite = int(norms.numel() - finite.numel())
+            diagnostics['grad_norm/non_finite_steps'] = n_non_finite
+            if finite.numel():
+                qs = torch.tensor([0.5, 0.9, 0.99])
+                p50, p90, p99 = (float(v) for v in torch.quantile(finite, qs))
+                diagnostics.update({
+                    'grad_norm/mean': float(finite.mean()),
+                    'grad_norm/p50': p50,
+                    'grad_norm/p90': p90,
+                    'grad_norm/p99': p99,
+                    'grad_norm/max': float(finite.max()),
+                    'grad_norm/min': float(finite.min()),
+                })
             diagnostics.update({
-                'grad_norm/mean': float(norms.mean()),
-                'grad_norm/p50': p50,
-                'grad_norm/p90': p90,
-                'grad_norm/p99': p99,
-                'grad_norm/max': float(norms.max()),
-                'grad_norm/min': float(norms.min()),
                 'grad_norm/clip_threshold': grad_clip,
                 'grad_norm/clipped_fraction': clipped_steps / max(len(grad_norms), 1),
             })

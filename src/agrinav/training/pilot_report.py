@@ -20,6 +20,7 @@ testable without a GPU.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -105,7 +106,21 @@ def read_metrics(path: str | Path) -> list[dict[str, Any]]:
 
 
 def _series(rows: list[dict[str, Any]], key: str) -> list[float]:
-    return [float(r[key]) for r in rows if isinstance(r.get(key), (int, float))]
+    """Numeric values for ``key``, skipping missing and non-finite entries.
+
+    NaN passes ``isinstance(x, float)``, so an unfiltered series lets a single
+    AMP-overflow epoch turn ``max(...)`` into NaN -- and whether it does is
+    decided by list order, which is how one pilot arm recommended a real
+    grad_clip and the other recommended ``nan`` from the same code path.
+    """
+    values = []
+    for row in rows:
+        value = row.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = float(value)
+            if math.isfinite(value):
+                values.append(value)
+    return values
 
 
 def recommend_grad_clip(rows: list[dict[str, Any]]) -> GradClipAdvice:
