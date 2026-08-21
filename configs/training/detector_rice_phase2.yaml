@@ -55,26 +55,36 @@ save_every: 4
 repeat_factor: 1            # 1798 train images is already a real epoch
 min_lr: 0.00001             # cosine floor
 warmup_factor: 0.001        # LR multiplier at warmup start
-# Gradient-norm clip. 40 sits just above the largest norm seen in 900 measured
-# steps, so it binds on nothing observed and the LR schedule -- not the clip --
-# sets the step size on both arms. It remains a guard against a genuine
-# explosion.
+# Gradient-norm clip. A backstop against one pathological batch, NOT a step-size
+# control. 100 binds on nothing measured in any regime and still catches a real
+# divergence, which produces norms in the hundreds, not in the tens.
 #
-# Was 0.5, which fired on 100% of steps in every run ever recorded here. Measured
-# in pilot_20260819_180855 (2 epochs, batch 8, AMP, A100), pre-clip norms over
-# 450 steps per arm:
-#   riceseg  p50 5.377  p90  6.872  p99 10.538  max 13.996   (1 non-finite)
-#   imagenet p50 8.207  p90 18.079  p99 32.907  max 39.667   (3 non-finite)
-# At 0.5 that is a 10-16x truncation at the median and up to 80x at the tail.
+# Was 0.5, which fired on 100% of steps in every run this project ever recorded.
+# Every unthrottled measurement to date:
 #
-# Not set to the production arm's p99 (10.5) on purpose: that would clip ~1% of
-# RiceSEG steps but ~25% of ImageNet steps, making the control's effective step
-# size a function of the clip and reintroducing a confound into the very
-# comparison the two-arm pilot exists to make.
+#   regime                                        p50    p90    p99     max
+#   overfit-8,  batch 2, random init, 150 ep     4.436  6.770  40.949  77.745
+#   overfit-16, batch 2, random init, 150 ep     3.804  5.060  23.908  69.106
+#   phase-2 riceseg,  batch 8, warm-start, AMP   5.377  6.872  10.538  13.996
+#   phase-2 imagenet, batch 8, warm-start, AMP   8.207 18.079  32.907  39.667
 #
-# Two epochs is a small sample and the cosine schedule changes the dynamics --
-# re-read grad_norm/p99 and grad_norm/non_finite_steps after the 18-epoch run.
-grad_clip: 40.0
+# p50 is 3.8-8.2 everywhere; only the tail moves with batch size. At 0.5 that is
+# a 10-16x truncation at the median and up to 80x at the tail.
+#
+# 100 rather than the phase-2 max of 39.7: that value came from 2 epochs, and the
+# real run is 18 with a cosine schedule. A clip sitting on the observed maximum
+# starts binding the moment a later epoch is noisier than the pilot -- silently,
+# and back into the trap this whole exercise came out of. 100 covers the noisier
+# batch-2 regime too, so one number serves the gate and the run.
+#
+# Not the production arm's p99 (10.5) on purpose: that clips ~1% of RiceSEG steps
+# but ~25% of ImageNet steps, making the control's effective step size a function
+# of the clip and reintroducing a confound into the comparison the two-arm pilot
+# exists to make.
+#
+# grad_norm/clipped_fraction is recorded per epoch. If it is ever non-zero, read
+# it before changing anything else.
+grad_clip: 100.0
 
 # --- regularisation / speed ---
 augment: true               # geometric + photometric augmentation (label-aligned)

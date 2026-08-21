@@ -298,6 +298,57 @@ true p99 of 32.907 was silently dropped, understating the correct clip by ~3x.
 Both call sites now filter non-finite values, and `grad_norm/non_finite_steps` is
 recorded per epoch.
 
+## The overfit gate, and what `grad_clip` was really worth — 2026-08-19
+
+The gate now **PASSES**, at `--overfit 16 --epochs 150 --grad-clip 100`:
+
+```
+AP 0.5224  AP50 0.8750  AR100 0.6315  conf_ratio 1.01  loss 4.5681 -> 0.2309
+grad_norm p50 3.804  p90 5.060  p99 23.908  max 69.106  clipped 0.0%
+```
+
+Holding one seed and one dataset fixed and changing only the clip:
+
+| `--overfit` | epochs | grad_clip | AP | AP50 | AR@100 | clipped |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 60 | 0.5 | 0.0012 | 0.0064 | 0.0286 | 100.0% |
+| 8 | 60 | 120 | 0.0628 | 0.3331 | 0.2563 | 0.0% |
+| 8 | 150 | 120 | 0.2440 | 0.7190 | 0.4131 | 0.0% |
+| 16 | 150 | 100 | **0.5224** | **0.8750** | **0.6315** | 0.0% |
+
+**A 52x AP50 improvement from one flag.** The gradient norms are the tell: under
+the 0.5 clip they sat at p50 65.5 for all 60 epochs, because the weights never
+moved and the loss surface never flattened. Unthrottled they fall to 3.8-5.6 as
+the model actually converges. The `p50 65` figure was never a property of this
+model — it was the fingerprint of a model held still.
+
+**The thresholds were never wrong; the image count was.** `--overfit 8` gives 240
+optimizer steps at 60 epochs and 600 at 150, against the ~1200 that the AP50 0.50
+and AR@100 0.50 floors were calibrated on at `--overfit 16`. Lowering the AR floor
+to 0.35 was proposed on the overfit-8 evidence and **rejected** — correctly. The
+floor is reachable; the gate was simply pointed at the wrong configuration. Do not
+lower these to fit a smaller gate.
+
+**Correction to the entry above.** The AP-vs-AP50 gap was called a localization
+weakness and "the leading suspect" on a single overfit-8 measurement. The AP/AP50
+ratio is 0.339 at overfit-8 and 0.597 at overfit-16 — most of that gap was
+under-training, not architecture. It is not currently a suspect. The resolution
+study still stands on the dataset-card evidence (56% of train boxes COCO-small at
+512 px), not on this.
+
+**`grad_clip` raised 40.0 -> 100.0.** 40 was set just above the pilot's observed
+max of 39.667, from two epochs. The real run is 18 with a cosine schedule, and a
+clip sitting on the observed maximum starts binding the moment a later epoch is
+noisier than the pilot — silently, and straight back into this trap. 100 clears
+every unthrottled measurement in any regime (max 77.745) and still catches a
+divergence, which produces norms in the hundreds.
+
+**Still armed:** `_HARD_DEFAULTS['grad_clip'] = 0.5` remains the fallback for any
+invocation without `--config`. The phase-2 YAML was fixed first and this gate
+still failed, because the gate passes no config. The gate now sets `--grad-clip`
+explicitly; the default itself is unchanged and will catch the next config-less
+caller.
+
 ## Standing engineering debt that does not block a shakedown
 
 EXIF normalization is applied at dataset build time, so the loader's missing
