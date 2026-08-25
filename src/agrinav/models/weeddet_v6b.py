@@ -931,11 +931,51 @@ VariFocalLoss = HardTargetFocalLikeLoss
 
 class WeedDetLoss(nn.Module):
     """Combined loss: SmoothL1 + CIoU (regression) + VariFocal (classification)."""
+    CLS_TARGET_MODES = ("hard", "anchor_iou", "pred_iou")
+
     def __init__(self, num_classes=1, iou_threshold=0.5, neg_iou_threshold=0.4,
-                 use_atss=True, atss_topk=9, vfl_use_pred_iou=False):
+                 use_atss=True, atss_topk=9, vfl_use_pred_iou=False,
+                 cls_target_mode=None):
         super().__init__()
-        self.vfl_use_pred_iou  = vfl_use_pred_iou   # False => anchor-GT IoU target (bootstraps)
-        self.cls_hard_target   = True   # v7 FIX: positives get target 1.0 (see forward)
+        # What a POSITIVE anchor is trained to predict. This decides whether the
+        # classification score carries localisation quality, which decides
+        # whether NMS and COCO AP rank boxes usefully.
+        #
+        #   'hard'       target 1.0 regardless of box quality. The score is a
+        #                presence estimate only. Measured consequence on the
+        #                60-epoch phase-2 run: AP75/AP50 = 0.034 against 0.104
+        #                for a stock Faster R-CNN on the same split, and ~100
+        #                detections per image against the baseline's 55.
+        #   'anchor_iou' target = anchor-to-GT assignment IoU. Quality-aware and
+        #                available from step 1, so it does not depend on the
+        #                predictions being any good yet.
+        #   'pred_iou'   target = IoU(predicted box, matched GT). This is
+        #                VarifocalNet's IACS (arXiv:2008.13367), built on the
+        #                FCOS+ATSS family this model belongs to.
+        #
+        # HISTORY, and why the old measurements do not settle it: the notes
+        # below record 'pred_iou' cold-starving (AP50 0.008) and 'anchor_iou'
+        # capping confidence (AP50 0.037 on overfit-16). Both were measured
+        # under grad_clip 0.5, which is now known to have clipped 100% of steps
+        # and held even the 'hard' configuration at AP50 0.0064. Those runs are
+        # confounded and the comparison deserves a rerun at grad_clip 100.
+        #
+        # INTERACTION: `atss_all_neg` was set True because under hard 1.0
+        # targets, unsupervised anchors saturated to 1.00 and flooded false
+        # positives. Soft targets change that dynamic. Do not flip both at once
+        # -- vary this alone, against a locked assigner and evaluator.
+        if cls_target_mode is None:
+            cls_target_mode = "pred_iou" if vfl_use_pred_iou else "hard"
+        if cls_target_mode not in self.CLS_TARGET_MODES:
+            raise ValueError(
+                f"cls_target_mode={cls_target_mode!r} is not one of "
+                f"{self.CLS_TARGET_MODES}. An unrecognised mode would silently "
+                "fall through to a different training objective.")
+        self.cls_target_mode   = cls_target_mode
+        # Kept as derived attributes so existing readers and checkpoints that
+        # inspect them keep working.
+        self.vfl_use_pred_iou  = cls_target_mode == "pred_iou"
+        self.cls_hard_target   = cls_target_mode == "hard"
         self.atss_all_neg      = True   # T1 FIX (2026-07-09): no ignore band in ATSS mode.
         # Rationale: ~pos anchors with max_iou>=0.4 previously got ZERO cls gradient
         # ("ignore band"). Standard ATSS has no such band. Under hard 1.0 targets those
@@ -1150,12 +1190,12 @@ class WeedDetLoss(nn.Module):
                 # the boxes themselves at median IoU 0.69. Hard 1.0 restored
                 # confidence (overfit-16 AP@50 0.6+). Old quality target kept
                 # behind cls_hard_target=False for ablation.
-                if self.vfl_use_pred_iou:
+                if self.cls_target_mode == 'pred_iou':
                     with torch.no_grad():
                         target_q = elementwise_box_iou(pred_boxes, matched_gt).clamp_(0.0, 1.0)
-                elif self.cls_hard_target:
+                elif self.cls_target_mode == 'hard':
                     target_q = torch.ones(len(pos_idx), device=anchors.device)
-                else:
+                else:  # 'anchor_iou'
                     target_q = quality_iou[pos_idx].clamp(0.0, 1.0)
                 iacs[pos_idx, matched_cls] = target_q
 
@@ -1188,7 +1228,7 @@ class WeedDet(nn.Module):
     CLASS_NAMES = ['Rice']
 
     def __init__(self, num_classes=1, anchor_base_scale=3, lsc_k=7, use_atss=True,
-                 vfl_use_pred_iou=False):
+                 vfl_use_pred_iou=False, cls_target_mode=None):
         super().__init__()
         self.num_classes = num_classes
         self.backbone    = DetResNet50()
@@ -1201,7 +1241,8 @@ class WeedDet(nn.Module):
             strides=(4, 8, 16),
         )
         self.criterion   = WeedDetLoss(num_classes=num_classes, use_atss=use_atss,
-                                       vfl_use_pred_iou=vfl_use_pred_iou)
+                                       vfl_use_pred_iou=vfl_use_pred_iou,
+                                       cls_target_mode=cls_target_mode)
 
     def forward(self, images, targets=None):
         if isinstance(images, (list, tuple)):
@@ -1855,7 +1896,9 @@ def train_with_progress(config):
         anchor_base_scale=config.get('anchor_base_scale', 3),
         lsc_k=config.get('lsc_k', 7),
         use_atss=config.get('use_atss', True),
+        cls_target_mode=config.get('cls_target_mode', 'hard'),
     ).to(device)
+    print(f"cls target mode: {model.criterion.cls_target_mode}")
 
     # v6 (F1/F2): pretrained backbone, then BN policy — BEFORE optimizer
     # creation so requires_grad filtering sees the final flags.

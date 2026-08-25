@@ -95,6 +95,13 @@ _HARD_DEFAULTS: dict[str, Any] = {
     "use_ema": True,
     "ema_decay": 0.999,
     "grad_clip": 0.5,
+    # What a positive anchor is trained to predict:
+    #   'hard'       -> 1.0 regardless of box quality (historical default)
+    #   'anchor_iou' -> anchor-to-GT assignment IoU
+    #   'pred_iou'   -> IoU(predicted box, GT), i.e. VarifocalNet's IACS
+    # See WeedDetLoss for the measured consequences and the atss_all_neg
+    # interaction. Vary this alone.
+    "cls_target_mode": "hard",
     "checkpoint_dir": "checkpoints/weeddet",
     "class_names": list(DEFAULT_CLASS_NAMES),
     "augment": True,
@@ -165,6 +172,7 @@ _CLI_TO_CONFIG: dict[str, str] = {
     "parity_probe_images": "parity_probe_images",
     "dump_grad_norms": "dump_grad_norms",
     "grad_clip": "grad_clip",
+    "cls_target_mode": "cls_target_mode",
     "resume": "resume",
 }
 
@@ -549,7 +557,10 @@ def run_overfit(args: argparse.Namespace) -> int:
     )
 
     pretrained = (not args.no_pretrained_backbone) and torch.cuda.is_available()
-    model = _WD.WeedDet(num_classes=len(class_names)).to(device)
+    model = _WD.WeedDet(
+        num_classes=len(class_names),
+        cls_target_mode=getattr(args, "cls_target_mode", None) or "hard",
+    ).to(device)
     if pretrained:
         _WD.load_imagenet_backbone(model)
     bn_scope = "imagenet" if pretrained else None
@@ -949,6 +960,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--num-workers", type=int, default=None, help="DataLoader workers (default: 2)"
+    )
+    parser.add_argument(
+        "--cls-target-mode",
+        default=None,
+        choices=("hard", "anchor_iou", "pred_iou"),
+        help="classification target for POSITIVE anchors. 'hard' (default) "
+        "trains every positive to 1.0, so the score carries no localisation "
+        "quality; 'anchor_iou' uses the assignment IoU; 'pred_iou' is "
+        "VarifocalNet's IACS. Changes what the score means to NMS and to COCO "
+        "AP -- vary it alone, against a locked assigner and evaluator",
     )
     parser.add_argument(
         "--save-every", type=int, default=None, help="periodic checkpoint epoch stride"
