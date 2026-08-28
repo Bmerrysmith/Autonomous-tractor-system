@@ -550,6 +550,21 @@ def train(
             "val_dataset and val_ann_file must be given together: AP needs both the "
             "images and the ground truth they are scored against."
         )
+    # The control arm needs the same sealed-test guard the WeedDet arm has
+    # (weeddet_train.py, `_build_config`). Without it the two arms are not
+    # comparable on the one axis that decides whether a number is publishable:
+    # the baseline could select its `best` checkpoint against the test split
+    # while WeedDet is refused, and nothing would say so.
+    if val_ann_file is not None:
+        from agrinav.evaluation.metrics import names_a_test_split
+
+        if names_a_test_split(val_ann_file):
+            raise BaselineError(
+                f"refusing to validate on {os.fspath(val_ann_file)!r}: "
+                "the test split is sealed and "
+                "must never drive checkpoint selection or threshold choice "
+                "(CLAUDE.md 13.3). Pass the valid split instead."
+            )
 
     out_dir = os.fspath(out_dir)
     os.makedirs(out_dir, exist_ok=True)

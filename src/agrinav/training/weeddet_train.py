@@ -444,7 +444,9 @@ def build_config(args: argparse.Namespace) -> dict[str, Any]:
         )
     if val_ann is not None and val_root is not None:
         val_ann, val_root = os.fspath(val_ann), os.fspath(val_root)
-        if os.path.basename(val_ann).startswith("test"):
+        from agrinav.evaluation.metrics import names_a_test_split
+
+        if names_a_test_split(val_ann):
             raise ValueError(
                 f"refusing to validate on {val_ann!r}: the test split is sealed and "
                 "must never drive checkpoint selection or threshold choice "
