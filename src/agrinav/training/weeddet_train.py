@@ -94,7 +94,20 @@ _HARD_DEFAULTS: dict[str, Any] = {
     "use_amp": None,  # None -> resolved to cuda-availability
     "use_ema": True,
     "ema_decay": 0.999,
-    "grad_clip": 0.5,
+    # Backstop against one pathological batch, NOT a step-size control.
+    #
+    # Was 0.5, which configs/training/detector_rice_phase2.yaml already overrode
+    # to 100.0 on the evidence in docs/GATE_STATUS.md -- 0.5 clipped 100% of
+    # steps in every regime this project ever recorded, a 10-16x truncation at
+    # the median. The code default was never updated to match, so anything that
+    # did not load that config -- notably the overfit gate -- kept running at
+    # the value the project had already rejected.
+    #
+    # This matters more after the 2026-08-28 assigner fix: correct assignment
+    # yields ~9x fewer positives, so the num_pos-normalised loss and its
+    # gradients grow by roughly the same factor. Measured on the gate fixture,
+    # the 2-epoch loss drops at 100.0 and rises at 0.5.
+    "grad_clip": 100.0,
     # What a positive anchor is trained to predict:
     #   'hard'       -> 1.0 regardless of box quality (historical default)
     #   'anchor_iou' -> anchor-to-GT assignment IoU
