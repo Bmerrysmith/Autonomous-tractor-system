@@ -791,6 +791,18 @@ class AnchorGenerator(nn.Module):
         self.scales        = scales
         self.strides       = strides
         self.num_anchors_per_level = []
+        # Anchor shapes co-located at one grid cell. `_make_anchors` emits them
+        # in ratio-major, scale-minor order and `forward` reshapes to
+        # [cell, shape, 4] -> flat, so anchor index == cell_index * num_shapes
+        # + shape_index, exactly.
+        #
+        # This is STRUCTURAL and must never be re-derived by comparing anchor
+        # centres for equality. That is what the pre-2026-08-28 assigner did,
+        # and `(x1 + x2) * 0.5` is not exact in float32: 2 of the 12 shapes lose
+        # their centre to 1-ULP round-off, so the count came back 10 at every
+        # level. The candidate selector then strode a period-12 array in steps
+        # of 10 and silently selected windows straddling two grid cells.
+        self.num_shapes = len(aspect_ratios) * len(scales)
 
     @torch.no_grad()
     def forward(self, features, img_shape):
@@ -932,10 +944,16 @@ VariFocalLoss = HardTargetFocalLikeLoss
 class WeedDetLoss(nn.Module):
     """Combined loss: SmoothL1 + CIoU (regression) + VariFocal (classification)."""
     CLS_TARGET_MODES = ("hard", "anchor_iou", "pred_iou")
+    #: How ATSS builds its candidate pool. See `_assign_atss` for the measured
+    #: comparison; `cells_best_shape` is the default and `legacy` reproduces the
+    #: pre-2026-08-28 behaviour for ablation.
+    ATSS_CANDIDATE_MODES = ("cells_best_shape", "priors", "priors_iou_tiebreak",
+                            "legacy")
 
     def __init__(self, num_classes=1, iou_threshold=0.5, neg_iou_threshold=0.4,
                  use_atss=True, atss_topk=9, vfl_use_pred_iou=False,
-                 cls_target_mode=None):
+                 cls_target_mode=None, atss_candidate_mode="cells_best_shape",
+                 num_shapes_per_location=12):
         super().__init__()
         # What a POSITIVE anchor is trained to predict. This decides whether the
         # classification score carries localisation quality, which decides
@@ -987,6 +1005,13 @@ class WeedDetLoss(nn.Module):
         self.neg_iou_threshold = neg_iou_threshold
         self.use_atss          = use_atss
         self.atss_topk         = atss_topk
+        if atss_candidate_mode not in self.ATSS_CANDIDATE_MODES:
+            raise ValueError(
+                f"atss_candidate_mode={atss_candidate_mode!r} is not one of "
+                f"{self.ATSS_CANDIDATE_MODES}. An unrecognised mode would "
+                "silently change which anchors are trained as positives.")
+        self.atss_candidate_mode     = atss_candidate_mode
+        self.num_shapes_per_location = num_shapes_per_location
         self.ciou_loss         = CIoULoss()
         self.varifocal         = VariFocalLoss()
 
@@ -1061,27 +1086,68 @@ class WeedDetLoss(nn.Module):
         gt_centers = (gt_boxes[:, :2] + gt_boxes[:, 2:]) * 0.5
         distances = ((centers[:, None, :] - gt_centers[None, :, :]) ** 2).sum(dim=2)
 
-        # AUDIT FIX (P1-2): select top-k distinct CELLS per level, then take every
-        # anchor shape at those cells. All co-located shapes share one centre, so
-        # the old per-anchor top-k could return k shapes at a single cell instead
-        # of k nearby spatial locations, destroying the neighbourhood ATSS needs
-        # to compute its mean+std IoU threshold.
+        # ATSS candidate selection. See ATSS_CANDIDATE_MODES.
+        #
+        # Measured 2026-08-28 on 2034 real GT boxes from the phase-2 rebuild
+        # train split, letterboxed to 512 exactly as training does:
+        #
+        #   mode                     pos/GT  mean IoU  >=0.75  >=0.5
+        #   legacy (was the default)  45.71    0.5006  0.0127  0.4211
+        #   priors (literal mmdet)     4.92    0.5990  0.0799  0.8469
+        #   cells_best_shape           4.58    0.6376  0.1096  0.9754
+        #   priors_iou_tiebreak        4.92    0.6244  0.1006  0.9288
+        #   best anchor available         -    0.7346  0.4258  0.9946
+        #
+        # The decisive column is the last one: `legacy` trained 58% of its
+        # positives at IoU < 0.5, i.e. below the threshold AP50 itself uses.
+        #
+        # Why not literal mmdet ATSS: it takes top-k PRIORS by centre distance,
+        # which assumes one prior per location. This model has 12 co-located
+        # shapes sharing a centre, so top-k is decided by tie-breaking on index
+        # order rather than by geometry. `cells_best_shape` restores both the
+        # spatial neighbourhood ATSS needs for its mean+std statistic AND the
+        # one-candidate-per-location semantics the algorithm was derived under.
+        n_shapes = max(int(self.num_shapes_per_location), 1)
         candidate_idxs = []
         start = 0
         for n_level in num_anchors_per_level:
             end = start + n_level
             if end <= start:
                 continue
-            lvl_centers = centers[start:end]
-            # Anchors sharing the first centre = shapes per cell (grid centres are unique).
-            per_cell = int((lvl_centers == lvl_centers[0]).all(dim=1).sum().item()) or 1
-            n_cells = max(n_level // per_cell, 1)
-            cell_dist = distances[start:end:per_cell][:n_cells]      # [n_cells, num_gt]
-            k = min(self.atss_topk, n_cells)
-            _, topk_cells = cell_dist.topk(k, dim=0, largest=False)  # [k, num_gt]
-            cell_base = start + topk_cells * per_cell                # [k, num_gt]
-            offsets = torch.arange(per_cell, device=device).view(per_cell, 1, 1)
-            idxs = (cell_base.unsqueeze(0) + offsets).reshape(k * per_cell, num_gt)
+            if self.atss_candidate_mode == 'legacy':
+                lvl_centers = centers[start:end]
+                per_cell = int((lvl_centers == lvl_centers[0]).all(dim=1).sum().item()) or 1
+                n_cells = max(n_level // per_cell, 1)
+                cell_dist = distances[start:end:per_cell][:n_cells]
+                k = min(self.atss_topk, n_cells)
+                _, topk_cells = cell_dist.topk(k, dim=0, largest=False)
+                cell_base = start + topk_cells * per_cell
+                offsets = torch.arange(per_cell, device=device).view(per_cell, 1, 1)
+                idxs = (cell_base.unsqueeze(0) + offsets).reshape(k * per_cell, num_gt)
+            elif self.atss_candidate_mode == 'cells_best_shape':
+                n_cells = max(n_level // n_shapes, 1)
+                # One representative centre per cell. Strided indexing, not a
+                # float comparison: index == cell * n_shapes + shape.
+                cell_dist = distances[start:end:n_shapes][:n_cells]   # [n_cells, num_gt]
+                k = min(self.atss_topk, n_cells)
+                _, topk_cells = cell_dist.topk(k, dim=0, largest=False)
+                cell_base = start + topk_cells * n_shapes             # [k, num_gt]
+                offsets = torch.arange(n_shapes, device=device).view(n_shapes, 1, 1)
+                all_shapes = cell_base.unsqueeze(0) + offsets         # [n_shapes, k, num_gt]
+                gt_ar = torch.arange(num_gt, device=device)
+                shape_iou = ious[all_shapes.reshape(-1, num_gt), gt_ar]
+                shape_iou = shape_iou.reshape(n_shapes, k, num_gt)
+                best_shape = shape_iou.argmax(dim=0)                  # [k, num_gt]
+                idxs = torch.gather(all_shapes, 0, best_shape.unsqueeze(0)).squeeze(0)
+            else:
+                k = min(self.atss_topk, n_level)
+                key = distances[start:end]
+                if self.atss_candidate_mode == 'priors_iou_tiebreak':
+                    # Co-located shapes tie exactly on distance; nudge by IoU so
+                    # the better-shaped anchor wins the tie instead of index order.
+                    key = key - ious[start:end] * 1e-6
+                _, idxs = key.topk(k, dim=0, largest=False)
+                idxs = start + idxs
             candidate_idxs.append(idxs)
             start = end
 
@@ -1228,21 +1294,27 @@ class WeedDet(nn.Module):
     CLASS_NAMES = ['Rice']
 
     def __init__(self, num_classes=1, anchor_base_scale=3, lsc_k=7, use_atss=True,
-                 vfl_use_pred_iou=False, cls_target_mode=None):
+                 vfl_use_pred_iou=False, cls_target_mode=None,
+                 atss_candidate_mode="cells_best_shape"):
         super().__init__()
         self.num_classes = num_classes
         self.backbone    = DetResNet50()
         self.fpn         = eFPN(512, 1024, 2048, 256)
-        self.head        = ERetinaHead(256, num_classes, 12, lsc_k)
         self.anchor_gen  = AnchorGenerator(
             base_scale=anchor_base_scale,
             aspect_ratios=(0.2, 0.33, 0.5, 1.0),
             scales=(1.0, 2**(1/3), 2**(2/3)),
             strides=(4, 8, 16),
         )
+        # The head must emit one prediction per anchor shape per location, so it
+        # is sized from the generator rather than from a repeated literal.
+        self.head        = ERetinaHead(256, num_classes,
+                                       self.anchor_gen.num_shapes, lsc_k)
         self.criterion   = WeedDetLoss(num_classes=num_classes, use_atss=use_atss,
                                        vfl_use_pred_iou=vfl_use_pred_iou,
-                                       cls_target_mode=cls_target_mode)
+                                       cls_target_mode=cls_target_mode,
+                                       atss_candidate_mode=atss_candidate_mode,
+                                       num_shapes_per_location=self.anchor_gen.num_shapes)
 
     def forward(self, images, targets=None):
         if isinstance(images, (list, tuple)):
