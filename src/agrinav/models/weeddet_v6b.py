@@ -755,8 +755,15 @@ class ERetinaHead(nn.Module):
         self.cls_head = nn.Conv2d(mid, num_classes * num_anchors, 3, padding=1)
         self.reg_head = nn.Conv2d(mid, 4 * num_anchors, 3, padding=1)
 
+        # RetinaNet initialises BOTH output convs at std 0.01 and only the
+        # classification BIAS from the prior. This head previously left
+        # cls_head.weight at PyTorch's kaiming_uniform default -- expected std
+        # ~0.0241 for a 3x3 over 64 channels, i.e. 2.4x the regression head --
+        # so the prior_prob bias was fighting a noisier weight init than the
+        # calculation assumes.
         prior_prob = 0.01
         bias_val = -math.log((1 - prior_prob) / prior_prob)
+        nn.init.normal_(self.cls_head.weight, std=0.01)
         nn.init.constant_(self.cls_head.bias, bias_val)
         nn.init.normal_(self.reg_head.weight, std=0.01)
         nn.init.zeros_(self.reg_head.bias)
@@ -1684,22 +1691,61 @@ def set_seed(seed=42, deterministic=False):
 
 
 class ModelEMA:
-    """Exponential Moving Average wrapper for model weights."""
-    def __init__(self, model, decay=0.999):
+    """Exponential Moving Average wrapper for model weights.
+
+    The EMA weights are what get scored and what get saved, so a cold start is
+    not cosmetic. With a fixed decay of 0.999 and 225 optimiser steps per epoch,
+    ``0.999 ** 225 = 0.798``: the epoch-1 average is 80% random initialisation,
+    and the epoch-2 checkpoint draw scores weights that are still 64% init. That
+    is visible in the retained 2026-07-30 run, whose ``val_ema/cls_loss`` at
+    epoch 1 is 4.513 against an analytically untrained value of 4.5135.
+
+    ``ramp=True`` applies the standard warmup used by the YOLOv5/timm family:
+    the effective decay starts near 0 and rises to ``decay``, so early averages
+    track the live weights instead of the initialisation. ``ramp_tau`` sets how
+    fast; the default reaches ~0.9 of ``decay`` after roughly 2*tau updates.
+
+    Set ``ramp=False`` to reproduce the pre-2026-08-28 behaviour for ablation.
+    """
+    def __init__(self, model, decay=0.999, ramp=True, ramp_tau=2000.0):
         import copy
         self.ema = copy.deepcopy(model).eval()
         self.decay = decay
+        self.ramp = ramp
+        self.ramp_tau = float(ramp_tau)
+        self.updates = 0
         for p in self.ema.parameters():
             p.requires_grad_(False)
 
+    def current_decay(self):
+        """Effective decay for the next update. Constant when ``ramp`` is off."""
+        if not self.ramp:
+            return self.decay
+        return self.decay * (1.0 - math.exp(-self.updates / self.ramp_tau))
+
     @torch.no_grad()
     def update(self, model):
+        self.updates += 1
+        d = self.current_decay()
         msd = model.state_dict()
         for k, v in self.ema.state_dict().items():
             if v.dtype.is_floating_point:
-                v.copy_(v * self.decay + msd[k].detach() * (1.0 - self.decay))
+                v.copy_(v * d + msd[k].detach() * (1.0 - d))
             else:
                 v.copy_(msd[k])
+
+    def state_dict(self):
+        return {"decay": self.decay, "ramp": self.ramp,
+                "ramp_tau": self.ramp_tau, "updates": self.updates}
+
+    def load_state_dict(self, state):
+        """Restore the ramp counter so a resumed run does not re-warm the EMA."""
+        if not state:
+            return
+        self.decay    = state.get("decay", self.decay)
+        self.ramp     = state.get("ramp", self.ramp)
+        self.ramp_tau = state.get("ramp_tau", self.ramp_tau)
+        self.updates  = int(state.get("updates", 0))
 
 class WarmupMultiStepLR:
     def __init__(self, optimizer, warmup_iters=500, warmup_factor=0.001):
@@ -1883,10 +1929,30 @@ def _restore_training_state(ckpt_path, *, model, ema, optimizer, lr_scheduler, w
     model.load_state_dict(raw, strict=True)
     if ema is not None:
         ema.ema.load_state_dict(ckpt['state_dict'], strict=True)
+        # Restore the ramp counter too. Without it a resumed run restarts the
+        # EMA warmup and re-averages the restored weights toward the live ones,
+        # which is a different trajectory from an uninterrupted run.
+        if ckpt.get('ema_state') is not None and hasattr(ema, 'load_state_dict'):
+            ema.load_state_dict(ckpt['ema_state'])
 
     optimizer.load_state_dict(ckpt['optimizer'])
     if ckpt.get('scheduler') is not None:
+        # CosineAnnealingLR carries T_max in its state, so a plain load would
+        # overwrite the horizon just computed for THIS run with the one from the
+        # run that wrote the checkpoint. That matters because the recursive
+        # cosine form is periodic: past its T_max the LR climbs back up rather
+        # than staying at min_lr. Extending a finished run -- exactly what the
+        # "raise num_epochs to continue training" message tells you to do --
+        # would otherwise restore the old, shorter horizon and send the LR back
+        # toward base_lr.
+        _new_horizon = getattr(lr_scheduler, 'T_max', None)
         lr_scheduler.load_state_dict(ckpt['scheduler'])
+        if _new_horizon is not None:
+            _old_horizon = getattr(lr_scheduler, 'T_max', None)
+            lr_scheduler.T_max = _new_horizon
+            if _old_horizon is not None and _old_horizon != _new_horizon:
+                log(f"[resume] cosine horizon T_max {_old_horizon} -> {_new_horizon} "
+                    "(kept this run's schedule; the checkpoint's would be periodic)")
     if ckpt.get('warmup') is not None:
         warmup.load_state_dict(ckpt['warmup'])
     if scaler is not None and ckpt.get('scaler') is not None:
@@ -2459,6 +2525,9 @@ def train_with_progress(config):
                     'class_names': list(config.get('class_names', [])),
                     'num_classes': config.get('num_classes'),
                     'config': saved_config,
+                    'ema_state': (ema.state_dict()
+                                  if ema is not None and hasattr(ema, 'state_dict')
+                                  else None),
                     'scaler': scaler.state_dict() if use_amp else None}
 
         # Always write a terminal artifact. Previously the only per-epoch files
