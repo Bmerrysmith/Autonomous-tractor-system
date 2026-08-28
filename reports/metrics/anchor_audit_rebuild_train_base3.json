@@ -1,0 +1,102 @@
+{
+  "anchor_config": {
+    "aspect_ratios": [
+      0.2,
+      0.33,
+      0.5,
+      1.0
+    ],
+    "base_scale": 3,
+    "max_aspect_ratio_w_over_h": 1.0,
+    "max_side_px": 170.38,
+    "min_side_px": 5.37,
+    "n_distinct_shapes": 36,
+    "scales": [
+      1.0,
+      1.2599210498948732,
+      1.5874010519681994
+    ],
+    "strides": [
+      4,
+      8,
+      16
+    ]
+  },
+  "ann_file": "C:/Users/Benny Merr/Downloads/RICE_phase2_rebuild_2026-07-29/annotations/instances_train.coco.json",
+  "by_group": {
+    "class:rice_protect": {
+      "frac_grid_iou<0.3": 0.0,
+      "frac_grid_iou<0.4": 0.0009,
+      "frac_grid_iou<0.5": 0.0046,
+      "n": 52194
+    },
+    "class:weed_target": {
+      "frac_grid_iou<0.3": 0.0003,
+      "frac_grid_iou<0.4": 0.0017,
+      "frac_grid_iou<0.5": 0.0087,
+      "n": 7497
+    },
+    "ratio:slightly_wide(1.2-2)": {
+      "frac_grid_iou<0.3": 0.0,
+      "frac_grid_iou<0.4": 0.0,
+      "frac_grid_iou<0.5": 0.0006,
+      "n": 1593
+    },
+    "ratio:square(0.8-1.2)": {
+      "frac_grid_iou<0.3": 0.0002,
+      "frac_grid_iou<0.4": 0.0002,
+      "frac_grid_iou<0.5": 0.0022,
+      "n": 5942
+    },
+    "ratio:tall(w/h<0.8)": {
+      "frac_grid_iou<0.3": 0.0001,
+      "frac_grid_iou<0.4": 0.0009,
+      "frac_grid_iou<0.5": 0.0041,
+      "n": 52003
+    },
+    "ratio:wide(w/h>=2)": {
+      "frac_grid_iou<0.3": 0.0,
+      "frac_grid_iou<0.4": 0.085,
+      "frac_grid_iou<0.5": 0.5359,
+      "n": 153
+    },
+    "size:large": {
+      "frac_grid_iou<0.3": 0.0055,
+      "frac_grid_iou<0.4": 0.0909,
+      "frac_grid_iou<0.5": 0.3388,
+      "n": 363
+    },
+    "size:medium": {
+      "frac_grid_iou<0.3": 0.0,
+      "frac_grid_iou<0.4": 0.0002,
+      "frac_grid_iou<0.5": 0.0022,
+      "n": 25827
+    },
+    "size:small": {
+      "frac_grid_iou<0.3": 0.0001,
+      "frac_grid_iou<0.4": 0.0006,
+      "frac_grid_iou<0.5": 0.0038,
+      "n": 33501
+    }
+  },
+  "counts": {
+    "grid_iou<0.3": 4,
+    "grid_iou<0.4": 59,
+    "grid_iou<0.5": 307,
+    "shape_iou<0.3": 4,
+    "shape_iou<0.4": 55,
+    "shape_iou<0.5": 245
+  },
+  "fractions": {
+    "grid_iou<0.3": 0.0001,
+    "grid_iou<0.4": 0.001,
+    "grid_iou<0.5": 0.0051,
+    "shape_iou<0.3": 0.0001,
+    "shape_iou<0.4": 0.0009,
+    "shape_iou<0.5": 0.0041
+  },
+  "img_size": 512,
+  "mean_grid_iou": 0.7357,
+  "mean_shape_iou": 0.8375,
+  "n_boxes": 59691
+}

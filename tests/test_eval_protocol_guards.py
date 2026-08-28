@@ -12,6 +12,7 @@ Two defects motivated these:
    ``test``; ``baseline_det_control`` had no equivalent, so the two arms were
    not held to the same standard on checkpoint selection.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -21,10 +22,18 @@ from agrinav.evaluation.metrics import CocoEvalResult
 
 def _result(max_dets: int) -> CocoEvalResult:
     return CocoEvalResult(
-        ap=0.18, ap50=0.56, ap75=0.06,
-        ap_small=0.14, ap_medium=0.21, ap_large=0.30,
-        ar_1=0.10, ar_10=0.25, ar_100=0.30,
-        ar_small=0.24, ar_medium=0.33, ar_large=0.41,
+        ap=0.18,
+        ap50=0.56,
+        ap75=0.06,
+        ap_small=0.14,
+        ap_medium=0.21,
+        ap_large=0.30,
+        ar_1=0.10,
+        ar_10=0.25,
+        ar_100=0.30,
+        ar_small=0.24,
+        ar_medium=0.33,
+        ar_large=0.41,
         per_category_ap={1: 0.25, 2: 0.11},
         max_dets=max_dets,
         num_images=518,
@@ -35,6 +44,7 @@ def _result(max_dets: int) -> CocoEvalResult:
 
 
 # ---------------------------------------------------------------- maxDets
+
 
 def test_standard_maxdets_emits_the_coco_field_names():
     data = _result(100).to_dict()
@@ -70,10 +80,12 @@ def test_renamed_values_are_preserved_not_recomputed():
 @pytest.mark.parametrize("max_dets", [1, 10, 50, 100, 300, 1000])
 def test_to_dict_is_json_serialisable_at_any_budget(max_dets):
     import json
+
     json.dumps(_result(max_dets).to_dict())
 
 
 # ------------------------------------------------------- sealed test split
+
 
 @pytest.mark.parametrize("name", ["instances_test.coco.json", "test.json"])
 def test_baseline_refuses_to_validate_on_the_sealed_test_split(tmp_path, name):
@@ -99,19 +111,23 @@ def test_the_real_split_filename_is_actually_caught():
     from agrinav.evaluation.metrics import names_a_test_split
 
     assert names_a_test_split("instances_test.coco.json")
-    assert not "instances_test.coco.json".startswith("test"), (
-        "if this ever becomes True the historical bug description is wrong")
+    assert not "instances_test.coco.json".startswith(
+        "test"
+    ), "if this ever becomes True the historical bug description is wrong"
 
 
-@pytest.mark.parametrize("name,expected", [
-    ("instances_test.coco.json", True),
-    ("test.json", True),
-    ("my-test-set.json", True),
-    ("instances_valid.coco.json", False),
-    ("instances_train.coco.json", False),
-    ("latest_run.json", False),
-    ("contest.json", False),
-])
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("instances_test.coco.json", True),
+        ("test.json", True),
+        ("my-test-set.json", True),
+        ("instances_valid.coco.json", False),
+        ("instances_train.coco.json", False),
+        ("latest_run.json", False),
+        ("contest.json", False),
+    ],
+)
 def test_token_boundaries_avoid_false_positives(name, expected):
     from agrinav.evaluation.metrics import names_a_test_split
 
@@ -121,6 +137,7 @@ def test_token_boundaries_avoid_false_positives(name, expected):
 def test_baseline_guard_matches_the_weeddet_guard_wording():
     """Both arms must cite the same rule, so a reader cannot think they differ."""
     import inspect
+
     from agrinav.training import baseline_det_control, weeddet_train
 
     a = inspect.getsource(baseline_det_control)
@@ -133,6 +150,7 @@ def test_baseline_guard_matches_the_weeddet_guard_wording():
 
 class _MinimalConfig:
     """Enough surface for the guard to run before anything expensive."""
+
     seed = 42
     deterministic = False
     class_names = ("rice_protect", "weed_target")

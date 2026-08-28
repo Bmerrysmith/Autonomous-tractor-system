@@ -7,11 +7,11 @@ retained 2026-07-30 run shows this directly: val_ema/cls_loss at epoch 1 is
 4.513, and the analytically untrained value for prior_prob 0.01 is
 (1 - 0.01)^2 * -ln(0.01) = 4.5135.
 """
+
 from __future__ import annotations
 
 import math
 
-import pytest
 import torch
 import torch.nn as nn
 
@@ -45,7 +45,7 @@ def test_fixed_decay_is_still_mostly_initialisation_after_one_epoch():
     ema = ModelEMA(_Tiny(0.0), decay=0.999, ramp=False)
     w = _drive(ema, 225, target=1.0)
     # Weight on the initialisation is decay**steps.
-    assert math.isclose(float(w[0]), 1.0 - 0.999 ** 225, rel_tol=1e-3)
+    assert math.isclose(float(w[0]), 1.0 - 0.999**225, rel_tol=1e-3)
     assert float(w[0]) < 0.25, "expected the epoch-1 average to be mostly init"
 
 
@@ -54,8 +54,8 @@ def test_ramp_tracks_the_live_weights_early():
     ema = ModelEMA(_Tiny(0.0), decay=0.999, ramp=True, ramp_tau=2000.0)
     w = _drive(ema, 225, target=1.0)
     assert float(w[0]) > 0.90, (
-        f"ramped EMA still at {float(w[0]):.3f} after one epoch; the warmup is "
-        "not doing its job")
+        f"ramped EMA still at {float(w[0]):.3f} after one epoch; the warmup is " "not doing its job"
+    )
 
 
 def test_ramp_converges_to_the_configured_decay():
@@ -96,6 +96,7 @@ def test_load_state_dict_tolerates_a_pre_ramp_checkpoint():
 
 def test_non_float_buffers_are_copied_not_averaged():
     """Integer buffers such as num_batches_tracked must be assigned outright."""
+
     class _WithBuf(nn.Module):
         def __init__(self, v):
             super().__init__()

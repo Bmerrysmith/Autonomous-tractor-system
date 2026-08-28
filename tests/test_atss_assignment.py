@@ -11,9 +11,8 @@ The tests below are deliberately behavioural: they assert properties of the
 assignment, not the shape of the implementation, so a future rewrite that keeps
 the properties keeps passing.
 """
-from __future__ import annotations
 
-import math
+from __future__ import annotations
 
 import pytest
 import torch
@@ -44,15 +43,19 @@ def _synthetic_gt(n=24, seed=0):
     g = torch.Generator().manual_seed(seed)
     cx = torch.rand(n, generator=g) * 400 + 56
     cy = torch.rand(n, generator=g) * 400 + 56
-    w = torch.rand(n, generator=g) * 16 + 14      # 14-30 px
-    h = w / (torch.rand(n, generator=g) * 0.3 + 0.4)   # aspect 0.4-0.7
+    w = torch.rand(n, generator=g) * 16 + 14  # 14-30 px
+    h = w / (torch.rand(n, generator=g) * 0.3 + 0.4)  # aspect 0.4-0.7
     return torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=1)
 
 
 def _assign(mode, anchors, npl, gt, num_shapes=12):
-    loss = WeedDetLoss(num_classes=2, use_atss=True, atss_topk=9,
-                       atss_candidate_mode=mode,
-                       num_shapes_per_location=num_shapes)
+    loss = WeedDetLoss(
+        num_classes=2,
+        use_atss=True,
+        atss_topk=9,
+        atss_candidate_mode=mode,
+        num_shapes_per_location=num_shapes,
+    )
     ious = box_iou(anchors, gt)
     pos, neg, best, quality = loss._assign_atss(anchors, gt, ious, npl)
     return pos, neg, best, quality, ious
@@ -61,6 +64,7 @@ def _assign(mode, anchors, npl, gt, num_shapes=12):
 # --------------------------------------------------------------------------
 # The structural bug that caused the dilution
 # --------------------------------------------------------------------------
+
 
 def test_num_shapes_is_structural_not_float_derived():
     """12 shapes per location, from the config -- never from centre equality."""
@@ -72,12 +76,13 @@ def test_num_shapes_is_structural_not_float_derived():
     centers = (anchors[:, :2] + anchors[:, 2:]) * 0.5
     start = 0
     for n_level in npl:
-        lvl = centers[start:start + n_level]
+        lvl = centers[start : start + n_level]
         float_derived = int((lvl == lvl[0]).all(dim=1).sum().item())
         assert float_derived == 10, (
             "the historical float-equality derivation is expected to return 10; "
             f"got {float_derived}. If this changed, the regression guard below "
-            "no longer protects anything.")
+            "no longer protects anything."
+        )
         start += n_level
 
 
@@ -88,10 +93,12 @@ def test_anchor_index_layout_is_cell_major():
     start = 0
     for level, n_level in enumerate(npl):
         assert n_level % n_shapes == 0
-        widths = anchors[start:start + n_shapes, 2] - anchors[start:start + n_shapes, 0]
+        widths = anchors[start : start + n_shapes, 2] - anchors[start : start + n_shapes, 0]
         # The next cell repeats the same 12 shapes.
-        nxt = anchors[start + n_shapes:start + 2 * n_shapes, 2] \
-            - anchors[start + n_shapes:start + 2 * n_shapes, 0]
+        nxt = (
+            anchors[start + n_shapes : start + 2 * n_shapes, 2]
+            - anchors[start + n_shapes : start + 2 * n_shapes, 0]
+        )
         torch.testing.assert_close(widths, nxt)
         start += n_level
 
@@ -99,6 +106,7 @@ def test_anchor_index_layout_is_cell_major():
 # --------------------------------------------------------------------------
 # Behavioural guarantees of the assignment
 # --------------------------------------------------------------------------
+
 
 def test_default_mode_is_not_diluted():
     """The property the fix exists to establish.
@@ -144,7 +152,8 @@ def test_legacy_mode_still_reproduces_the_old_behaviour():
     per_gt = int(pos.sum()) / len(gt)
     assert per_gt > 20.0, (
         "legacy mode is supposed to reproduce the diluted assignment; "
-        f"got {per_gt:.2f} positives per GT")
+        f"got {per_gt:.2f} positives per GT"
+    )
 
 
 @pytest.mark.parametrize("mode", WeedDetLoss.ATSS_CANDIDATE_MODES)
@@ -153,8 +162,9 @@ def test_every_gt_owns_at_least_one_positive(mode):
     gt = _synthetic_gt()
     pos, _, best, _, _ = _assign(mode, anchors, npl, gt)
     owned = torch.unique(best[pos])
-    assert owned.numel() == len(gt), (
-        f"{mode}: {len(gt) - owned.numel()} ground-truth boxes have no positive anchor")
+    assert owned.numel() == len(
+        gt
+    ), f"{mode}: {len(gt) - owned.numel()} ground-truth boxes have no positive anchor"
 
 
 @pytest.mark.parametrize("mode", WeedDetLoss.ATSS_CANDIDATE_MODES)
@@ -178,12 +188,25 @@ def test_selection_is_deterministic():
     assert torch.equal(a, b)
 
 
-def test_empty_gt_does_not_crash_the_selector():
-    """A frame with no objects must yield no positives rather than an exception."""
-    _, anchors, npl = _anchors()
-    gt = torch.zeros((0, 4))
-    ious = box_iou(anchors, gt)
-    loss = WeedDetLoss(num_classes=2, atss_candidate_mode="cells_best_shape")
-    # The loss `forward` short-circuits empty targets; the assigner is only
-    # reached with at least one box, so assert the guard rather than the call.
-    assert ious.shape == (anchors.shape[0], 0)
+def test_empty_gt_image_produces_finite_losses():
+    """A frame with no objects must train as all-background, not crash or NaN."""
+    gen, anchors, npl = _anchors()
+    loss = WeedDetLoss(
+        num_classes=2,
+        atss_candidate_mode="cells_best_shape",
+        num_shapes_per_location=gen.num_shapes,
+    )
+
+    total = anchors.shape[0]
+    cls_logits = [torch.zeros(1, 2 * gen.num_shapes, IMG // s, IMG // s) for s in STRIDES]
+    regs = [torch.zeros(1, 4 * gen.num_shapes, IMG // s, IMG // s) for s in STRIDES]
+    targets = [{"boxes": torch.zeros((0, 4)), "labels": torch.zeros((0,), dtype=torch.long)}]
+
+    out = loss(cls_logits, regs, anchors, targets, npl)
+
+    assert int(out["num_pos_anchors"].item()) == 0
+    for key in ("cls_loss", "reg_loss", "total_loss"):
+        assert torch.isfinite(out[key]), f"{key} is not finite on an empty frame"
+    assert float(out["reg_loss"]) == 0.0, "no boxes means nothing to regress"
+    # Sanity: the anchor count the loss saw matches the generator's.
+    assert sum(npl) == total

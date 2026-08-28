@@ -32,7 +32,26 @@ deterministic: false        # allow cudnn autotuning for throughput
 # --- model ---
 # num_classes is derived from class_names; do not set it here.
 class_names: [rice_protect, weed_target]  # 2-class: name -> contiguous id order
-anchor_base_scale: 3        # anchor base scale (WeedDet default)
+# Anchor base scale. Anchor sqrt(area) is base_scale * stride * scale, so this
+# sets the whole ladder: at 3 it was 12/15/19 | 24/30/38 | 48/60/76 px against a
+# GT median of 29.6 px, putting the stride-4 level -- 76.2% of the entire anchor
+# budget -- below most of what it is meant to catch.
+#
+# Measured 2026-08-28 on 2034 real GT boxes from the phase-2 rebuild train split,
+# with the cells_best_shape assigner, reporting the fraction of assigned
+# positives at IoU >= 0.75 and at IoU >= 0.5:
+#
+#   base   pos/GT   mean IoU   >=0.75   >=0.5
+#   3.0      4.59     0.6374   0.1095  0.9749
+#   4.0      4.63     0.6734   0.1806  0.9739
+#   4.5      4.77     0.6770   0.2076  0.9554
+#
+# 4.0 rather than 4.5 deliberately. 4.5 buys a further 0.027 at IoU >= 0.75 and
+# costs 0.019 at IoU >= 0.5, and recall is the arm that is still behind
+# (AR100 0.2296 against the baseline's 0.2999). Trading >=0.5 coverage for >=0.75
+# is the wrong risk until recall is level. Revisit 4.5 as a one-variable ablation
+# once it is.
+anchor_base_scale: 4.0
 lsc_k: 7                    # large-separable-conv kernel in the head
 use_atss: true              # ATSS positive/negative anchor assignment
 
@@ -105,6 +124,12 @@ use_ema: true               # track an EMA of weights for the saved checkpoint
 # 518 images, hence the interval rather than every epoch. Requires
 # --val-ann-file/--val-images-root; 0 keeps val-loss selection.
 val_ap_interval: 2
+# Absolute, not proportional. The trainer defaults warmup_iters to 5% of
+# total_steps, which made it a function of num_epochs: 202 steps at 18 epochs and
+# 675 at 60, against the baseline control's fixed 500. That silently unmatched the
+# two arms AND made two WeedDet runs of different length non-comparable with each
+# other. Pin it so warmup is one fixed thing across every arm and budget.
+warmup_iters: 500
 # 'auto' keeps BN frozen where ImageNet stats exist and trainable for an
 # injected backbone. That coupling makes the ImageNet-vs-RiceSEG A/B a TWO-factor
 # change (backbone weights AND BN trainability). For a single-factor comparison,

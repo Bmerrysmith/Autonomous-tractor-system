@@ -1,0 +1,102 @@
+{
+  "anchor_config": {
+    "aspect_ratios": [
+      0.2,
+      0.33,
+      0.5,
+      1.0
+    ],
+    "base_scale": 4.0,
+    "max_aspect_ratio_w_over_h": 1.0,
+    "max_side_px": 227.17,
+    "min_side_px": 7.16,
+    "n_distinct_shapes": 36,
+    "scales": [
+      1.0,
+      1.2599210498948732,
+      1.5874010519681994
+    ],
+    "strides": [
+      4,
+      8,
+      16
+    ]
+  },
+  "ann_file": "C:/Users/Benny Merr/Downloads/RICE_phase2_rebuild_2026-07-29/annotations/instances_valid.coco.json",
+  "by_group": {
+    "class:rice_protect": {
+      "frac_grid_iou<0.3": 0.0004,
+      "frac_grid_iou<0.4": 0.0015,
+      "frac_grid_iou<0.5": 0.0062,
+      "n": 13201
+    },
+    "class:weed_target": {
+      "frac_grid_iou<0.3": 0.0005,
+      "frac_grid_iou<0.4": 0.0054,
+      "frac_grid_iou<0.5": 0.0217,
+      "n": 2025
+    },
+    "ratio:slightly_wide(1.2-2)": {
+      "frac_grid_iou<0.3": 0.0,
+      "frac_grid_iou<0.4": 0.0,
+      "frac_grid_iou<0.5": 0.0016,
+      "n": 612
+    },
+    "ratio:square(0.8-1.2)": {
+      "frac_grid_iou<0.3": 0.0,
+      "frac_grid_iou<0.4": 0.0,
+      "frac_grid_iou<0.5": 0.0,
+      "n": 2060
+    },
+    "ratio:tall(w/h<0.8)": {
+      "frac_grid_iou<0.3": 0.0004,
+      "frac_grid_iou<0.4": 0.0015,
+      "frac_grid_iou<0.5": 0.005,
+      "n": 12448
+    },
+    "ratio:wide(w/h>=2)": {
+      "frac_grid_iou<0.3": 0.0094,
+      "frac_grid_iou<0.4": 0.1132,
+      "frac_grid_iou<0.5": 0.5943,
+      "n": 106
+    },
+    "size:large": {
+      "frac_grid_iou<0.3": 0.0,
+      "frac_grid_iou<0.4": 0.0,
+      "frac_grid_iou<0.5": 0.0,
+      "n": 10
+    },
+    "size:medium": {
+      "frac_grid_iou<0.3": 0.0,
+      "frac_grid_iou<0.4": 0.0011,
+      "frac_grid_iou<0.5": 0.0059,
+      "n": 6587
+    },
+    "size:small": {
+      "frac_grid_iou<0.3": 0.0007,
+      "frac_grid_iou<0.4": 0.0028,
+      "frac_grid_iou<0.5": 0.0101,
+      "n": 8629
+    }
+  },
+  "counts": {
+    "grid_iou<0.3": 6,
+    "grid_iou<0.4": 31,
+    "grid_iou<0.5": 126,
+    "shape_iou<0.3": 6,
+    "shape_iou<0.4": 31,
+    "shape_iou<0.5": 123
+  },
+  "fractions": {
+    "grid_iou<0.3": 0.0004,
+    "grid_iou<0.4": 0.002,
+    "grid_iou<0.5": 0.0083,
+    "shape_iou<0.3": 0.0004,
+    "shape_iou<0.4": 0.002,
+    "shape_iou<0.5": 0.0081
+  },
+  "img_size": 512,
+  "mean_grid_iou": 0.76,
+  "mean_shape_iou": 0.8291,
+  "n_boxes": 15226
+}

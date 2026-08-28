@@ -7,6 +7,7 @@ the learning rate back up toward `base_lr` instead of holding at the floor --
 and the trainer's own resume error tells the user to raise `num_epochs`, which is
 exactly the path that triggers it.
 """
+
 from __future__ import annotations
 
 import torch
@@ -31,7 +32,8 @@ def test_cosine_is_periodic_past_its_horizon():
     assert at_horizon < 1e-4, f"expected the floor at T_max, got {at_horizon}"
     assert past_horizon > 100 * at_horizon, (
         "cosine should climb back up past T_max; if this no longer holds, the "
-        "resume guard is protecting against nothing")
+        "resume guard is protecting against nothing"
+    )
 
 
 def test_loading_a_checkpoint_overwrites_the_horizon():
@@ -81,5 +83,6 @@ def test_extended_run_stays_on_a_descending_schedule():
         new.step()
         lrs.append(opt.param_groups[0]["lr"])
 
-    assert all(b <= a + 1e-12 for a, b in zip(lrs, lrs[1:])), (
-        "learning rate rose while extending a run; the horizon guard failed")
+    assert all(
+        b <= a + 1e-12 for a, b in zip(lrs, lrs[1:])
+    ), "learning rate rose while extending a run; the horizon guard failed"
