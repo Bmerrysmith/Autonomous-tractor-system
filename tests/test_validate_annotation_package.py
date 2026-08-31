@@ -1,11 +1,18 @@
+import contextlib
 import copy
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from agrinav.data import validate_annotation_package
 from agrinav.data.validate_annotation_package import (
+    AnnotationValidationError,
+    _default_ontology,
     load_ontology,
+    main,
     validate_packages,
     validate_record,
     validate_split_groups,
@@ -451,6 +458,60 @@ class PackageValidationTests(unittest.TestCase):
             ("test", {"samples": [{"group_id": "g-1", "split": "test"}]}),
         ]
         self.assertEqual([], validate_split_groups(documents))
+
+
+class DefaultOntologyTests(unittest.TestCase):
+    """The ``--ontology`` default is the only ontology path most runs ever use."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_default_ontology_is_the_repo_ontology_and_exists(self) -> None:
+        self.assertEqual(ONTOLOGY_PATH.resolve(), _default_ontology())
+
+    def test_default_ontology_loads(self) -> None:
+        self.assertNotEqual({}, load_ontology(_default_ontology()))
+
+    def test_main_validates_a_package_without_an_explicit_ontology(self) -> None:
+        package = self.root / "annotations.jsonl"
+        package.write_text(json.dumps(base_record()) + "\n", encoding="utf-8")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main([str(package)])
+        self.assertEqual(0, exit_code, stdout.getvalue())
+
+    def test_main_still_honours_an_explicit_ontology(self) -> None:
+        package = self.root / "annotations.jsonl"
+        package.write_text(json.dumps(base_record()) + "\n", encoding="utf-8")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main([str(package), "--ontology", str(ONTOLOGY_PATH)])
+        self.assertEqual(0, exit_code, stdout.getvalue())
+
+    def test_missing_repo_root_asks_for_an_explicit_ontology(self) -> None:
+        installed = self.root / "site-packages" / "agrinav" / "data" / "module.py"
+        with mock.patch.object(validate_annotation_package, "__file__", str(installed)):
+            with self.assertRaises(AnnotationValidationError) as caught:
+                _default_ontology()
+        self.assertIn("--ontology", str(caught.exception))
+
+    def test_main_reports_a_missing_default_ontology_without_a_traceback(self) -> None:
+        package = self.root / "annotations.jsonl"
+        package.write_text(json.dumps(base_record()) + "\n", encoding="utf-8")
+        stderr = io.StringIO()
+        with mock.patch.object(
+            validate_annotation_package,
+            "_default_ontology",
+            side_effect=AnnotationValidationError("Default ontology not found; pass --ontology."),
+        ):
+            with contextlib.redirect_stderr(stderr):
+                exit_code = main([str(package)])
+        self.assertEqual(2, exit_code)
+        self.assertIn("--ontology", stderr.getvalue())
 
 
 if __name__ == "__main__":

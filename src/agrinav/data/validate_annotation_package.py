@@ -770,13 +770,29 @@ def validate_packages(
 
 
 def _default_ontology() -> Path:
-    return Path(__file__).resolve().parents[1] / "data" / "ontology.v1.json"
+    """Repo-root ``data/ontology.v1.json`` (src layout: src/agrinav/data/<this>).
+
+    Only a source checkout has that repo root, so an installed package must be
+    told where the ontology lives instead of guessing.
+    """
+    path = Path(__file__).resolve().parents[3] / "data" / "ontology.v1.json"
+    if not path.is_file():
+        raise AnnotationValidationError(
+            f"Default ontology not found at {path}. The default only resolves from a "
+            "source checkout; pass --ontology with the path to ontology.v1.json."
+        )
+    return path
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("packages", nargs="+", type=Path, help="JSONL package(s) to validate")
-    parser.add_argument("--ontology", type=Path, default=_default_ontology())
+    parser.add_argument(
+        "--ontology",
+        type=Path,
+        default=None,
+        help="ontology JSON (default: data/ontology.v1.json from the repo checkout)",
+    )
     parser.add_argument(
         "--manifest",
         action="append",
@@ -791,9 +807,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
+        ontology_path = args.ontology if args.ontology is not None else _default_ontology()
         errors = validate_packages(
             args.packages,
-            ontology_path=args.ontology,
+            ontology_path=ontology_path,
             manifest_paths=args.manifest,
             check_split_overlap=args.check_split_overlap,
         )
