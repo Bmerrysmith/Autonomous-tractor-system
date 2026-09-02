@@ -11,7 +11,7 @@ PYTHON ?= python
 PIP    ?= $(PYTHON) -m pip
 
 .PHONY: help install install-dev format lint typecheck test test-unit \
-        test-integration precommit clean
+        test-integration precommit clean cvat-labels
 
 help:
 	@echo "install          editable install (runtime deps)"
@@ -23,6 +23,7 @@ help:
 	@echo "test-unit        pytest -m unit"
 	@echo "test-integration pytest -m integration"
 	@echo "precommit        run all pre-commit hooks"
+	@echo "cvat-labels      generate CVAT label specs from data/ontology.v1.json"
 	@echo "clean            remove caches and build artifacts"
 
 install:
@@ -54,6 +55,16 @@ test-integration:
 
 precommit:
 	$(PYTHON) -m pre_commit run --all-files
+
+# Regenerate after any change to data/ontology.v1.json, then re-paste into the
+# CVAT project's Raw labels tab (docs/cvat.md §5). The box variant needs the
+# override flag on purpose: boxes are not canonical treatment geometry.
+cvat-labels:
+	$(PYTHON) -m agrinav.cli data-cvat-labels --out artifacts/cvat/labels_polygon.json
+	$(PYTHON) -m agrinav.cli data-cvat-labels --geometry mask \
+	  --out artifacts/cvat/labels_mask.json
+	$(PYTHON) -m agrinav.cli data-cvat-labels --geometry rectangle \
+	  --allow-non-canonical-geometry --out artifacts/cvat/labels_boxqa.json
 
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache .coverage htmlcov

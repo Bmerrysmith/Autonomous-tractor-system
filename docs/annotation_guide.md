@@ -160,7 +160,7 @@ LocateAnything produces boxes/points, not canonical masks. Refine its boxes with
 
 Recommended tools:
 
-- [CVAT](https://docs.cvat.ai/) for the canonical mask/polygon tasks, consensus/review, and COCO instance export;
+- [CVAT](https://docs.cvat.ai/) for the canonical mask/polygon tasks, consensus/review, and COCO instance export — local setup and label generation in [`cvat.md`](cvat.md);
 - [X-AnyLabeling](https://github.com/CVHub520/X-AnyLabeling) for the fastest Windows model-proposal pilot, including LocateAnything/SAM integrations;
 - [FiftyOne](https://docs.voxel51.com/) for group-aware selection, exact/near duplicates, uniqueness, error slices, and annotation round trips.
 

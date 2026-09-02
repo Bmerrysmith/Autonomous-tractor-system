@@ -1,0 +1,38 @@
+% AgriNav bibliography.
+%
+% NOTE: the Overleaf manuscript currently uses a manual `thebibliography`
+% environment (see PAPER_REVISION_TRACKER.md), not BibTeX. Each entry below
+% therefore carries a ready-to-paste IEEE \bibitem in its comment block, so the
+% two stay in sync until the manuscript moves to BibTeX.
+
+% --- Related work: rice-paddy weed detection -------------------------------
+%
+% \bibitem{chen2025geyolo}
+% Z. Chen, B. Chen, Y. Huang, and Z. Zhou, ``GE-YOLO for weed detection in rice
+% paddy fields,'' \emph{Appl. Sci.}, vol.~15, no.~5, art. no.~2823, Mar. 2025,
+% doi: 10.3390/app15052823.
+%
+% Comparability notes (read before citing a number from this paper):
+%   * Reported "93.1% mAP" is mAP@0.5. The paper states no IoU threshold
+%     (Eqs. 15-16); Ultralytics convention plus the P/R/F1 reporting makes @0.5
+%     the only consistent reading. It is NOT COCO mAP@[.50:.95].
+%   * ~2.8 objects/image (6,345 train objects); AgriNav phase-2 has 33.2.
+%   * 3 weed species only; rice is background. AgriNav also detects rice.
+%   * Stock YOLOv8 baseline scores 91.2%; the paper's contribution is +1.9.
+%   * 995 originals augmented to 3,297 (~3.3x). The paper does not state that
+%     augmentation was restricted to the training split; if it was not,
+%     augmented siblings appear in val/test. Unverifiable from the text.
+@article{chen2025geyolo,
+  author  = {Chen, Zimeng and Chen, Baifan and Huang, Yi and Zhou, Zeshun},
+  title   = {{GE-YOLO} for Weed Detection in Rice Paddy Fields},
+  journal = {Applied Sciences},
+  volume  = {15},
+  number  = {5},
+  pages   = {2823},
+  year    = {2025},
+  month   = mar,
+  doi     = {10.3390/app15052823},
+  url     = {https://doi.org/10.3390/app15052823},
+  note    = {Article number 2823. Reported mAP is mAP@0.5; see comparability
+             notes above and paper/BENCHMARK_COMPARISON_PLAN.md}
+}

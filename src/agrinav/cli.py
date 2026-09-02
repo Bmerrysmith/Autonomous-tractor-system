@@ -36,6 +36,8 @@ COMMANDS: dict[str, str] = {
     "data-pilot": "agrinav.data.build_annotation_pilot",
     "data-anchor-audit": "agrinav.data.anchor_audit",
     "data-build-rice-phase2": "agrinav.data.build_rice_phase2",
+    "data-cvat-labels": "agrinav.data.cvat_labels",
+    "data-cvat-to-records": "agrinav.data.cvat_export_to_records",
     # --- training ---
     "pretrain": "agrinav.training.riceseg_pretrain",
     "baseline-seg": "agrinav.training.baseline_seg_control",

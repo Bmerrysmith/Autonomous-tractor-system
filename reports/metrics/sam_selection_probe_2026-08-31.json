@@ -1,0 +1,157 @@
+{
+  "boxes_scored": 1280,
+  "by_label_box_iou": {
+    "rice_protect|multimask_argmax_pred_iou": {
+      "max": 0.9706,
+      "mean": 0.7031,
+      "median": 0.7117,
+      "min": 0.2135,
+      "n": 1075,
+      "p10": 0.5579,
+      "p25": 0.632,
+      "p75": 0.7824,
+      "p90": 0.8339
+    },
+    "rice_protect|single_mask_exact_box": {
+      "max": 0.9848,
+      "mean": 0.7634,
+      "median": 0.7772,
+      "min": 0.3538,
+      "n": 1075,
+      "p10": 0.6328,
+      "p25": 0.7057,
+      "p75": 0.8336,
+      "p90": 0.8761
+    },
+    "weed_target|multimask_argmax_pred_iou": {
+      "max": 0.9544,
+      "mean": 0.6907,
+      "median": 0.7043,
+      "min": 0.4075,
+      "n": 205,
+      "p10": 0.5269,
+      "p25": 0.6129,
+      "p75": 0.7701,
+      "p90": 0.8322
+    },
+    "weed_target|single_mask_exact_box": {
+      "max": 0.9332,
+      "mean": 0.7238,
+      "median": 0.7406,
+      "min": 0.4326,
+      "n": 205,
+      "p10": 0.571,
+      "p25": 0.6633,
+      "p75": 0.7963,
+      "p90": 0.8449
+    }
+  },
+  "by_rule": {
+    "multimask_argmax_pred_iou": {
+      "box_iou": {
+        "max": 0.9706,
+        "mean": 0.7011,
+        "median": 0.7104,
+        "min": 0.2135,
+        "n": 1280,
+        "p10": 0.5534,
+        "p25": 0.6304,
+        "p75": 0.7795,
+        "p90": 0.8339
+      },
+      "containment": {
+        "max": 1.0,
+        "mean": 0.9225,
+        "median": 0.9394,
+        "min": 0.5489,
+        "n": 1280,
+        "p10": 0.8353,
+        "p25": 0.8863,
+        "p75": 0.9747,
+        "p90": 0.9949
+      },
+      "empty_mask_rate": 0.0,
+      "fill": {
+        "max": 1.5381,
+        "mean": 0.626,
+        "median": 0.5978,
+        "min": 0.0505,
+        "n": 1280,
+        "p10": 0.3571,
+        "p25": 0.4611,
+        "p75": 0.774,
+        "p90": 0.9461
+      }
+    },
+    "single_mask_exact_box": {
+      "box_iou": {
+        "max": 0.9848,
+        "mean": 0.7571,
+        "median": 0.772,
+        "min": 0.3538,
+        "n": 1280,
+        "p10": 0.6232,
+        "p25": 0.6991,
+        "p75": 0.83,
+        "p90": 0.8719
+      },
+      "containment": {
+        "max": 1.0,
+        "mean": 0.964,
+        "median": 0.9767,
+        "min": 0.5489,
+        "n": 1280,
+        "p10": 0.9136,
+        "p25": 0.9496,
+        "p75": 0.9953,
+        "p90": 1.0
+      },
+      "empty_mask_rate": 0.0,
+      "fill": {
+        "max": 1.5381,
+        "mean": 0.5589,
+        "median": 0.5563,
+        "min": 0.0413,
+        "n": 1280,
+        "p10": 0.3591,
+        "p25": 0.4492,
+        "p75": 0.6647,
+        "p90": 0.7624
+      }
+    }
+  },
+  "dtype": "bfloat16",
+  "fraction_single_better": 0.6844,
+  "images": 40,
+  "model_pin": {
+    "model_id": "facebook/sam2.1-hiera-large",
+    "repo_last_modified": "2025-08-15 21:19:57+00:00",
+    "requested_revision": "665f8e2ad61cf5f53d65644ff27c8ee525124610",
+    "resolved_at": "2026-09-01T00:56:24Z",
+    "resolved_sha": "665f8e2ad61cf5f53d65644ff27c8ee525124610",
+    "resolved_via": "huggingface_hub.HfApi().model_info"
+  },
+  "note": "Measurement only. No mask, candidate or annotation record is written. Both rules operate on the same human box; neither asserts truth.",
+  "predictor_counters": {
+    "device": "cuda",
+    "dtype": "bfloat16",
+    "model_load_seconds": 0.8732,
+    "parameter_count": 216924865,
+    "predict_calls": 2560,
+    "predict_seconds": 15.9103,
+    "set_image_calls": 40,
+    "set_image_seconds": 3.385
+  },
+  "single_minus_multimask_box_iou": {
+    "max": 0.6758,
+    "mean": 0.056,
+    "median": 0.0334,
+    "min": -0.2846,
+    "n": 1280,
+    "p10": -0.0216,
+    "p25": 0.0,
+    "p75": 0.0975,
+    "p90": 0.1762
+  },
+  "wall_seconds": 23.371
+}
