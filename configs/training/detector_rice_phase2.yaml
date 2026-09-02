@@ -78,7 +78,13 @@ warmup_factor: 0.001        # LR multiplier at warmup start
 # control. 100 binds on nothing measured in any regime and still catches a real
 # divergence, which produces norms in the hundreds, not in the tens.
 #
-# Was 0.5, which fired on 100% of steps in every run this project ever recorded.
+# Was 0.5. One run has a committed clipped_fraction record: 2026-07-30 clipped
+# 3150 of 3150 steps at that value, so the clip and not the LR schedule set the
+# effective step size (docs/GATE_STATUS.md). Runs before that predate the
+# gradient-norm instrumentation and recorded no fraction at all — the 0.5 clip
+# was in force for them, but "100% of steps" is measured for 2026-07-30 only and
+# must not be restated as a property of every historical run.
+#
 # Every unthrottled measurement to date:
 #
 #   regime                                        p50    p90    p99     max

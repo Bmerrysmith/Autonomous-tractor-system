@@ -214,12 +214,39 @@ most safety-critical class.
 3. **Segmentation proxy.** The detector uses an FPN + ATSS/VFL head, not this
    seg decoder. A weak seg result is a strong warning, not a detection metric.
 
-**Actionable implication.** DeepLabV3's backbone *is* a standard torchvision
-ResNet-50 — which produces the same C3/C4/C5 the WeedDet FPN consumes and loads
-342/342 ImageNet tensors (vs the custom stem's 288/342). The lowest-risk next
-step is to pretrain/train the detector on a **standard ResNet-50 backbone**,
-keeping the existing FPN/ATSS/VFL detector design intact, rather than the custom
-Det-ResNet-50 stem. That is a backbone swap, not a detector rewrite. (A ViT like
+**Actionable implication.** A standard ResNet-50 backbone is worth testing in the
+detector — it loads 342/342 ImageNet tensors against the custom stem's 288/342,
+and that coverage gap is the leading suspect for the weed result above.
+
+**It is not a drop-in swap. Corrected 2026-09-02** — an earlier version of this
+paragraph claimed a standard ResNet-50 "produces the same C3/C4/C5 the WeedDet
+FPN consumes" and called the change "a backbone swap, not a detector rewrite."
+Both are wrong, and the error is about **stride**, not channels:
+
+| backbone | C3 / C4 / C5 stride | channels |
+|---|---|---|
+| `DetResNet50` (this repo) | **4 / 8 / 16** | 512 / 1024 / 2048 |
+| stock torchvision ResNet-50 | **8 / 16 / 32** | 512 / 1024 / 2048 |
+| torchvision `deeplabv3_resnet50` | **8 / 8 / 8** | 512 / 1024 / 2048 |
+
+The custom stem is `s1, s1, s2` (total stride 2 before `layer1`), where stock
+ResNet-50 is `7x7 s2` + `maxpool s2` (total stride 4). Every pyramid level
+therefore sits one octave coarser on stock ResNet-50. DeepLabV3 is further away
+still: torchvision builds it with `replace_stride_with_dilation=[False, True,
+True]`, so `layer3`/`layer4` are dilated rather than strided and all three
+outputs land at stride 8. Verified against torchvision 0.28.0.
+
+Channels match in all three cases, so the FPN's `1x1` laterals accept any of
+them and the swap **fails silently** rather than raising. What breaks is
+downstream of the FPN: `AnchorGenerator` hardcodes `strides=(4, 8, 16)`, and
+`anchor_base_scale: 4.0` was chosen against 2,034 real GT boxes *at those
+strides* (see `configs/training/detector_rice_phase2.yaml`). Move the levels an
+octave and that tuning no longer describes the anchors it was measured on.
+
+So the real work is: make the backbone's strides explicit at the interface, pass
+them through to the anchor generator instead of hardcoding, and re-run the anchor
+audit at the new strides before reading any detector AP. That is a matched A/B
+with a re-tuned anchor ladder, not a one-line backbone substitution. (A ViT like
 SegFormer/DINOv2 scores highest here but has no C3/C4/C5 pyramid and would need a
 new neck — a larger change to weigh separately.)
 
