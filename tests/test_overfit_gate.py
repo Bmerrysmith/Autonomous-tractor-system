@@ -142,7 +142,12 @@ def test_the_gate_passes_when_the_decoded_metrics_are_good(tmp_path, monkeypatch
         },
     )
     ann_file, images_root = _write_synthetic_split(str(tmp_path))
-    assert main(_argv(tmp_path, ann_file, images_root)) == 0
+    # grad_clip pinned for the same reason as test_thresholds_are_configurable,
+    # and with the same caveat: 0.5 is not a recommendation, the default is 100.
+    # This test asserts the gate PASSES, so it needs all four conditions met, and
+    # the loss-drop condition is the one with no flag to monkeypatch. See the
+    # measured table in that test's comment.
+    assert main(_argv(tmp_path, ann_file, images_root, grad_clip=0.5)) == 0
     assert "PASSED" in capsys.readouterr().out
 
 
@@ -194,7 +199,23 @@ def test_thresholds_are_configurable(tmp_path, monkeypatch):
         },
     )
     ann_file, images_root = _write_synthetic_split(str(tmp_path))
-    assert main(_argv(tmp_path, ann_file, images_root)) == 1
+    # grad_clip is pinned, and 0.5 is NOT a recommendation -- the production
+    # default is 100 (b650fff). It is pinned because the gate's fourth condition,
+    # `final_loss < initial_loss`, is the one gate condition with no flag, so
+    # unlike AP50/AR100/parity this test cannot neutralise it by monkeypatch. On
+    # this 2-epoch 64px fixture the loss-drop outcome is a function of step size:
+    # 5.0077 -> 4.8899 at clip 0.5 and 4.7616 at 5.0, but 5.0077 -> 5.0471 at
+    # both 40 and 100, while cls_pos still falls 4.3802 -> 4.1745. Measured
+    # 2026-09-02. Raising the epoch count does not fix it -- the sign oscillates
+    # (4 drops, 6 rises, 8 drops, 12 rises), so any epoch count that passes is
+    # calibration to a lucky number, not a test.
+    #
+    # This test pins threshold *configurability*. Pinning the step size keeps the
+    # unrelated fourth condition out of the result. It does mean the assertions
+    # below never exercise the production default; the gate's behaviour there is
+    # covered by test_the_gate_reports_the_gradient_norm_distribution.
+    clip = {"grad_clip": 0.5}
+    assert main(_argv(tmp_path, ann_file, images_root, **clip)) == 1
     assert (
         main(
             _argv(
@@ -203,6 +224,7 @@ def test_thresholds_are_configurable(tmp_path, monkeypatch):
                 images_root,
                 overfit_min_ap50=0.10,
                 overfit_min_recall=0.05,
+                **clip,
             )
         )
         == 0
