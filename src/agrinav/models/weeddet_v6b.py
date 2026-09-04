@@ -48,6 +48,7 @@ Single-class rice config (AgriNav):
 import json
 import math
 import os
+import sys
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -2239,7 +2240,31 @@ def train_with_progress(config):
     show_bars = TQDM_AVAILABLE and not config.get('no_progress', False)
 
     def _log(message):
-        """Epoch summaries must not interleave with the bar's stderr writes."""
+        """Epoch summaries must not interleave with the bar's stderr writes.
+
+        The message is coerced to the stream's own encoding first. A Windows
+        console is cp1252, and one un-encodable character raises
+        UnicodeEncodeError from inside ``print``/``tqdm.write`` — which happens
+        *after* the checkpoint is written, so a run dies over a decoration with
+        its weights already safely on disk. Degrading the character is always
+        preferable to losing the run.
+        """
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            message.encode(encoding)
+        except UnicodeEncodeError:
+            # backslashreplace, not replace: these lines carry checkpoint paths,
+            # and collapsing a character to "?" silently corrupts a path the
+            # operator is being told to go and look at. "★" stays readable
+            # and stays recoverable.
+            message = message.encode(encoding, errors="backslashreplace").decode(
+                encoding, errors="replace"
+            )
+        except LookupError:
+            # The stream names a codec this interpreter does not have. Retrying
+            # with that same name would raise again, so ASCII is the only safe
+            # target here.
+            message = message.encode("ascii", errors="backslashreplace").decode("ascii")
         if show_bars:
             tqdm.write(message)
         else:
@@ -2540,7 +2565,7 @@ def train_with_progress(config):
         if is_best:
             path = os.path.join(ckpt_dir, 'weeddet_best.pth')
             atomic_torch_save(_payload(best_loss), path)
-            _log(f"  ★ Best checkpoint ({select_metric}={best_loss:.4f}) -> {path}")
+            _log(f"  * Best checkpoint ({select_metric}={best_loss:.4f}) -> {path}")
 
         if epoch % save_every == 0:
             path = os.path.join(ckpt_dir, f'weeddet_epoch{epoch}.pth')
