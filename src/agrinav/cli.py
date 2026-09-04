@@ -32,6 +32,7 @@ COMMANDS: dict[str, str] = {
     "data-coco-to-proposals": "agrinav.data.coco_boxes_to_proposals",
     "data-locateanything": "agrinav.data.locateanything_to_proposals",
     "data-sam-mask": "agrinav.data.sam_box_to_mask",
+    "data-optimize-proposals": "agrinav.data.optimize_proposals",
     "data-triage": "agrinav.data.triage_proposals",
     "data-pilot": "agrinav.data.build_annotation_pilot",
     "data-anchor-audit": "agrinav.data.anchor_audit",
