@@ -2020,6 +2020,59 @@ def evaluate_val_loss(model, loader, device):
     return {k: v / batches for k, v in totals.items()}
 
 
+def _run_provenance(config):
+    """Code and environment identity for this run (CLAUDE.md §24).
+
+    Written because the 2026-09-03 ablation produced ten runs that cannot say
+    which code made them: `status.json` recorded no commit, no config hash and
+    no seed, and the runs executed against an uncommitted working tree. A metric
+    without this cannot be reproduced or fairly compared to a later one.
+
+    Every field degrades to None rather than raising. Recording provenance must
+    never be the thing that kills a training run that otherwise succeeded.
+    """
+    # Imported here rather than at module scope: this runs once per run, and the
+    # module is imported by CPU-only tooling that has no use for them.
+    import datetime
+    import hashlib
+    import platform
+    import subprocess
+
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+
+    def _git(*args):
+        try:
+            done = subprocess.run(
+                ['git', *args], cwd=repo_dir, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    porcelain = _git('status', '--porcelain')
+    config_json = json.dumps(config, sort_keys=True, default=str)
+
+    return {
+        'git_commit': _git('rev-parse', 'HEAD'),
+        'git_branch': _git('rev-parse', '--abbrev-ref', 'HEAD'),
+        # None means "could not determine", which is not the same as clean.
+        'git_dirty': None if porcelain is None else bool(porcelain),
+        'config_sha256': hashlib.sha256(config_json.encode('utf-8')).hexdigest(),
+        'seed': config.get('seed'),
+        'deterministic': config.get('deterministic', False),
+        'img_size': config.get('img_size'),
+        'batch_size': config.get('batch_size'),
+        'num_epochs': config.get('num_epochs'),
+        'anchor_base_scale': config.get('anchor_base_scale'),
+        'use_atss': config.get('use_atss'),
+        'python_version': platform.python_version(),
+        'torch_version': torch.__version__,
+        'cuda_version': torch.version.cuda,
+        'device_name': (
+            torch.cuda.get_device_name(0) if torch.cuda.is_available() else None),
+        'recorded_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
 def train_with_progress(config):
     """Training loop with tqdm progress bars — preferred for Colab/Kaggle."""
     device = torch.device(
@@ -2586,6 +2639,7 @@ def train_with_progress(config):
         'amp_skipped_steps': amp_skipped_steps,
         'global_step': global_step,
         'checkpoint_dir': os.path.abspath(ckpt_dir),
+        'provenance': _run_provenance(config),
     }
     status_path = os.path.join(ckpt_dir, 'status.json')
     with open(status_path, 'w', encoding='utf-8') as handle:

@@ -47,6 +47,7 @@ COMMANDS: dict[str, str] = {
     # --- evaluation ---
     "evaluate": "agrinav.evaluation.metrics",
     "evaluate-detector": "agrinav.evaluation.runner",
+    "run-summary": "agrinav.evaluation.run_summary",
 }
 
 
