@@ -1,0 +1,70 @@
+# AgriNav overrides for the upstream CVAT stack.
+#
+# Copy (or symlink) this file into the CVAT clone next to its docker-compose.yml.
+# Compose picks up a file named docker-compose.override.yml automatically, so
+# `docker compose up -d` inside the CVAT clone applies it with no extra flags.
+#
+# What it does: publishes each dataset read-only under /home/django/share in
+# every service that reads task files. That is CVAT's "Connected file share"
+# feature — a task references images already on disk instead of uploading
+# gigabytes through the browser, nothing is copied, and the read-only flag means
+# CVAT cannot write into the dataset it is annotating.
+#
+# One bind per dataset, rather than one bind of a parent directory, because the
+# parent directories also hold redundant copies, a quarantined set, and the
+# sealed test split. What is absent here is absent deliberately; the mount table
+# and the exclusion list are in docs/cvat.md.
+#
+# Why binds rather than the named volume with `driver_opts: {type: none,
+# o: bind}` shown in CVAT's own installation guide: that form caches the device
+# path inside the volume, so changing a path later silently keeps mounting the
+# old directory until the volume is removed by hand (cvat-ai/cvat issues #6113,
+# #6698). A bind mount re-reads the path on every `up`.
+#
+# The service list is the set that reads task files, per CVAT's installation
+# guide, and each name is present in the upstream docker-compose.yml. If a
+# future CVAT release renames one, `docker compose config --services` in the
+# clone lists the current names and compose fails loudly on an unknown key.
+
+services:
+  cvat_server:
+    volumes: &agrinav_share
+      # --- detection: curated RICE, grouped split -------------------------
+      # The 261-image test split is deliberately NOT mounted. It is sealed;
+      # leaving it unreachable is what stops it being opened by accident.
+      - type: bind
+        source: ${AGRINAV_RICE_TRAIN:?set AGRINAV_RICE_TRAIN in the CVAT clone's .env}
+        target: /home/django/share/rice_phase2/train
+        read_only: true
+      - type: bind
+        source: ${AGRINAV_RICE_VALID:?set AGRINAV_RICE_VALID in the CVAT clone's .env}
+        target: /home/django/share/rice_phase2/valid
+        read_only: true
+
+      # --- segmentation: expert masks -------------------------------------
+      - type: bind
+        source: ${AGRINAV_RICESEG:?set AGRINAV_RICESEG in the CVAT clone's .env}
+        target: /home/django/share/riceseg
+        read_only: true
+      - type: bind
+        source: ${AGRINAV_RICE_PLANT:?set AGRINAV_RICE_PLANT in the CVAT clone's .env}
+        target: /home/django/share/rice_plant_masks
+        read_only: true
+
+      # --- classification: weed species ------------------------------------
+      - type: bind
+        source: ${AGRINAV_WEED_SPECIES:?set AGRINAV_WEED_SPECIES in the CVAT clone's .env}
+        target: /home/django/share/weed_species_v3
+        read_only: true
+
+  cvat_worker_import:
+    volumes: *agrinav_share
+
+  cvat_worker_export:
+    volumes: *agrinav_share
+
+  cvat_worker_annotation:
+    volumes: *agrinav_share
+
+  cvat_worker_chunks:
+    volumes: *agrinav_share

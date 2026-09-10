@@ -94,7 +94,27 @@ python scripts/sam_box_to_mask.py \
 ### 3–4. Triage, review, validate
 
 Route with `scripts/triage_proposals.py`, review in CVAT/X-AnyLabeling, then
-gate the resulting package before it can enter a split:
+gate the resulting package before it can enter a split.
+
+Standing CVAT up, generating its labels from the ontology, and organizing tasks
+by split: [`cvat.md`](cvat.md).
+
+A CVAT COCO export is **not** in the JSONL format the gate below reads, so there
+is a conversion step between them:
+
+```bash
+agrinav data-cvat-to-records \
+  --coco <cvat-export>/annotations/instances_default.json \
+  --manifest <dataset>/manifests/split_membership.json \
+  --dataset-id rice_phase2 --dataset-version rebuild-2026-07-29 \
+  --review-metadata artifacts/cvat/review_metadata.json \
+  --out artifacts/annotation/reviewed/annotations.jsonl
+```
+
+The `--review-metadata` sidecar is not optional in practice: CVAT's COCO export
+writes `coco_instances` only and drops the image-level tag, so without it every
+converted record is `unreviewed` and every `verified_empty` is `null`. See
+[`cvat.md`](cvat.md) §8.
 
 ```bash
 python scripts/validate_annotation_package.py artifacts/annotation/reviewed/annotations.jsonl \

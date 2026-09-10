@@ -44,13 +44,42 @@ PREFLIGHT IS A HARD BLOCKER (fail closed, before any GPU allocation)
 
 COST MODEL
 ----------
-Median 27 boxes/image over 1347 images. The image embedding is computed ONCE
-per image and amortised over its boxes; a naive per-box ``set_image()`` is ~27x
-the cost and will not finish a Colab session. Per box we run 8 decoder-only
-passes: 3 ``multimask_output`` candidates on the exact human box, plus K=5
-deterministic box jitters (each edge perturbed +/-3% of the box w/h, seeded by
-``sha256(image_sha|source_object_id|k)`` so the jitter agreement statistic is
-reproducible and cannot be reshuffled by re-running).
+Median 27 boxes/image over 1347 images (median 33 over the 2318-image phase-2
+rebuild). The image embedding is computed ONCE per image and amortised over its
+boxes; a naive per-box ``set_image()`` is ~30x the cost and will not finish a
+Colab session.
+
+Per non-degenerate box we run ``DECODER_PASSES_PER_BOX`` = 7 decoder-only
+passes, yielding ``CANDIDATES_PER_BOX`` = 9 candidates:
+
+* ONE ``multimask_output=True`` pass on the exact human box -> 3 candidates
+  (``kind="multimask"``). That head exists to resolve AMBIGUITY (whole / part /
+  subpart) and is aimed at point prompts.
+* K=5 ``multimask_output=False`` passes on deterministic box jitters (each edge
+  perturbed +/-3% of the box w/h, seeded by
+  ``sha256(image_sha|source_object_id|k)`` so the jitter agreement statistic is
+  reproducible and cannot be reshuffled by re-running) -> 5 candidates
+  (``kind="jitter"``).
+* ONE ``multimask_output=False`` pass on the UNJITTERED human box -> 1
+  candidate (``kind="single_mask"``). A box is an UNAMBIGUOUS prompt, which is
+  the case the single-mask head is trained for. Measured on 1280 boxes of the
+  phase-2 rebuild it recovers the human box better than ``argmax(pred_iou)``
+  over the multimask heads (median box IoU 0.772 vs 0.710, containment 0.977 vs
+  0.939) and better than the legacy polygon set a re-seed would replace
+  (0.759). Before it existed the candidate set could not express the
+  configuration the model is best at, so a re-seed measurably LOST geometry.
+  See reports/summaries/sam_reseed_pilot_2026-08-31.md.
+
+NOTE: an earlier revision of this docstring said "8 decoder-only passes" for
+what were 6 passes producing 8 candidates. Passes and candidates are not the
+same number, because one ``multimask_output=True`` pass returns three masks.
+Both counts are now constants DERIVED from the per-group constants, so
+``run_thresholds()`` cannot drift from what the loop actually emits.
+
+Candidates are appended in the order multimask, jitter, single_mask, so adding
+the single-mask candidate did NOT renumber any pre-existing
+``candidate_index``. Downstream statistics select by ``kind``, and the jitter
+set is unchanged.
 
 CLI (driven from notebooks/sam_box_to_mask_colab.ipynb as a thin driver):
 
@@ -108,7 +137,27 @@ PLACEHOLDER_REVISIONS = frozenset(
 
 MULTIMASK_CANDIDATES = 3
 JITTER_CANDIDATES = 5
+SINGLE_MASK_CANDIDATES = 1
 JITTER_FRACTION = 0.03
+
+#: Candidate ``kind`` vocabulary, in emission order. CLOSED: a kind not listed
+#: here has no meaning downstream. The order is part of the contract because
+#: ``candidate_index`` is positional.
+CANDIDATE_KIND_MULTIMASK = "multimask"
+CANDIDATE_KIND_JITTER = "jitter"
+CANDIDATE_KIND_SINGLE_MASK = "single_mask"
+CANDIDATE_KINDS: tuple[str, ...] = (
+    CANDIDATE_KIND_MULTIMASK,
+    CANDIDATE_KIND_JITTER,
+    CANDIDATE_KIND_SINGLE_MASK,
+)
+
+#: DERIVED, never literals. ``run_thresholds()`` records these, so provenance
+#: claiming N passes while the loop emits M is a bug that cannot occur. One
+#: ``multimask_output=True`` pass returns MULTIMASK_CANDIDATES masks, which is
+#: why the two totals differ.
+CANDIDATES_PER_BOX = MULTIMASK_CANDIDATES + JITTER_CANDIDATES + SINGLE_MASK_CANDIDATES
+DECODER_PASSES_PER_BOX = 1 + JITTER_CANDIDATES + SINGLE_MASK_CANDIDATES
 
 
 class SamPreflightError(Exception):
@@ -290,9 +339,16 @@ def run_thresholds(
 ) -> dict[str, Any]:
     """Non-empty thresholds dict. This stage FITS NOTHING; these are run params."""
     return {
+        # True of the multimask group only; the jitter and single_mask groups
+        # run multimask_output=False. Retained so readers of earlier shards keep
+        # a stable key -- "candidate_kinds" is the complete answer.
         "multimask_output": True,
         "multimask_candidates": MULTIMASK_CANDIDATES,
         "jitter_candidates": JITTER_CANDIDATES,
+        "single_mask_candidates": SINGLE_MASK_CANDIDATES,
+        "candidate_kinds": list(CANDIDATE_KINDS),
+        "candidates_per_box": CANDIDATES_PER_BOX,
+        "decoder_passes_per_box": DECODER_PASSES_PER_BOX,
         "jitter_fraction": jitter_fraction,
         "candidate_selection": "deferred_to_optimize_proposals",
         "mask_score_threshold": None,
@@ -437,7 +493,7 @@ def candidates_for_box(
         candidates.append(
             {
                 "candidate_index": len(candidates),
-                "kind": "multimask",
+                "kind": CANDIDATE_KIND_MULTIMASK,
                 "multimask_index": i,
                 "jitter_index": None,
                 "prompt_box": list(clipped),
@@ -456,7 +512,7 @@ def candidates_for_box(
         candidates.append(
             {
                 "candidate_index": len(candidates),
-                "kind": "jitter",
+                "kind": CANDIDATE_KIND_JITTER,
                 "multimask_index": None,
                 "jitter_index": k,
                 "prompt_box": list(jittered),
@@ -465,6 +521,26 @@ def candidates_for_box(
                 "rle": encode_mask_rle(mask),
             }
         )
+
+    # The single-mask head on the UNJITTERED human box. Appended LAST on
+    # purpose: candidate_index is positional, so placing it next to its
+    # semantic neighbour (the multimask group, which shares this prompt box)
+    # would renumber every jitter candidate and silently invalidate any stored
+    # index. Same prompt box as the multimask group, one decoder pass.
+    smasks, sscores = _predict_box(predictor, clipped, multimask_output=False)
+    mask = smasks[0].astype(bool)
+    candidates.append(
+        {
+            "candidate_index": len(candidates),
+            "kind": CANDIDATE_KIND_SINGLE_MASK,
+            "multimask_index": None,
+            "jitter_index": None,
+            "prompt_box": list(clipped),
+            "sam_pred_iou": float(sscores[0]) if sscores.size else None,
+            "area_px": mask_pixel_area(mask),
+            "rle": encode_mask_rle(mask),
+        }
+    )
     return candidates, None
 
 
@@ -561,17 +637,58 @@ def load_predictor_factory(spec: str) -> Callable[[], BoxPredictor]:
     return factory
 
 
-def default_predictor_factory(model_id: str, revision: str) -> Callable[[], BoxPredictor]:
-    """Build the real SAM2.1 predictor. Imported lazily — never at module import.
+def default_predictor_factory(
+    model_id: str,
+    revision: str,
+    device: str = "cuda",
+    dtype: str = "bfloat16",
+) -> Callable[[], BoxPredictor]:
+    """Build the real SAM2.1 predictor at a VERIFIED pinned commit.
 
-    This is the only place that would touch a GPU or download a checkpoint, and
-    it is unreachable from the unit tests (which always inject a stub).
+    Imported lazily — never at module import — so this module stays importable
+    with no GPU, no network and no model package. This is the only place that
+    would touch a GPU or download a checkpoint, and it is unreachable from the
+    unit tests (which always inject a stub or mock the loader).
+
+    WHY THIS NO LONGER USES THE UPSTREAM ``sam2`` PACKAGE
+    -----------------------------------------------------
+    It used to be::
+
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
+        return SAM2ImagePredictor.from_pretrained(model_id, revision=revision)
+
+    That call pins NOTHING. Upstream, ``SAM2ImagePredictor.from_pretrained``
+    forwards ``**kwargs`` to ``build_sam2_hf`` -> ``build_sam2`` ->
+    ``SAM2ImagePredictor.__init__``; not one of them passes ``revision`` to
+    ``hf_hub_download``, and each absorbs it into its own ``**kwargs``. The
+    download therefore resolves the repo's current ``main``, while
+    ``validate_model_revision`` has already written the requested sha into
+    provenance.
+
+    That is the same failure this module refuses ``PIN_BEFORE_RUN`` to prevent,
+    one layer further down and strictly worse: an unpinned run whose provenance
+    validates perfectly clean and is unrecoverable. A guard that records a sha
+    it did not enforce is worse than no guard at all.
+
+    ``agrinav.data.sam2_predictor`` loads the same weights through
+    ``transformers``, which does honour ``revision`` on ``from_pretrained``, and
+    re-asserts the resolved sha against the HuggingFace API before any GPU
+    allocation. The pin is verified, not merely recorded.
     """
+    pinned = validate_model_revision(revision)
 
     def _factory() -> BoxPredictor:  # pragma: no cover - requires GPU + network
-        from sam2.sam2_image_predictor import SAM2ImagePredictor
+        # Local import: agrinav.data.sam2_predictor imports FROM this module, so
+        # a module-level import would be circular.
+        from agrinav.data.sam2_predictor import build_predictor
 
-        return SAM2ImagePredictor.from_pretrained(model_id, revision=revision)
+        return build_predictor(
+            model_id=model_id,
+            revision=pinned,
+            device=device,
+            dtype=dtype,
+            verify_revision=True,
+        )
 
     return _factory
 
@@ -627,7 +744,9 @@ def process(
 
     predictor = predictor_factory()
 
-    stats = {
+    # Annotated: the mixed int/dict value types otherwise infer dict[str, object]
+    # and every += below is a mypy error. Pre-existing at HEAD; no runtime effect.
+    stats: dict[str, Any] = {
         "images_in_shard": len(mine),
         "images_processed": 0,
         "images_skipped_resume": 0,
@@ -682,6 +801,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="test-only injection point, 'module:attr' returning a predictor",
     )
     ap.add_argument("--allow-unmapped-categories", action="store_true")
+    ap.add_argument(
+        "--device",
+        default="cuda",
+        help="torch device for the default backend; refuses to fall back to CPU silently",
+    )
+    ap.add_argument(
+        "--dtype",
+        default="bfloat16",
+        help="compute dtype for the default backend (affects mask geometry)",
+    )
     args = ap.parse_args(argv)
 
     try:
@@ -691,7 +820,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         factory = (
             load_predictor_factory(args.predictor_factory)
             if args.predictor_factory
-            else default_predictor_factory(args.model_id, revision)
+            else default_predictor_factory(
+                args.model_id, revision, device=args.device, dtype=args.dtype
+            )
         )
         stats = process(
             zip_path=args.coco_zip,

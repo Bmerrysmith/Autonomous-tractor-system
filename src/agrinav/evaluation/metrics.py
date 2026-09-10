@@ -30,6 +30,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -87,12 +88,37 @@ class CocoEvalResult:
         return self.max_dets == _STANDARD_MAX_DETS
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-serialisable form (adds the derived ``is_standard_maxdets`` flag)."""
+        """JSON-serialisable form (adds the derived ``is_standard_maxdets`` flag).
+
+        At a non-standard ``maxDets`` the COCO-named fields stop meaning what
+        their names say. pycocotools' ``_summarizeDets`` passes ``maxDets[2]``
+        for stats[1], stats[2] and stats[8], so ``ap50``/``ap75`` are computed at
+        the non-standard budget and the field literally named ``ar_100`` is
+        AR at that budget -- while ``ap`` becomes the -1.0 sentinel because the
+        primary AP is only ever summarised at the hardcoded default of 100.
+
+        Publishing that dict verbatim would report, say, "AR@100 = 0.17" for a
+        number that is AR@300. So the misleading names are renamed rather than
+        silently emitted: they become ``ap50_at_maxdets`` and so on, and
+        ``ap`` is dropped in favour of an explicit ``ap_unavailable_reason``.
+        """
         data = asdict(self)
         # asdict keeps int keys; JSON needs str keys for the per-category maps.
         data["per_category_ap"] = {str(k): v for k, v in self.per_category_ap.items()}
         data["category_names"] = {str(k): v for k, v in self.category_names.items()}
         data["is_standard_maxdets"] = self.is_standard_maxdets
+        if not self.is_standard_maxdets:
+            suffix = f"_at_maxdets_{self.max_dets}"
+            for field in ("ap50", "ap75", "ar_100"):
+                data[f"{field}{suffix}"] = data.pop(field)
+            data.pop("ap", None)
+            data["ap_unavailable_reason"] = (
+                f"maxDets={self.max_dets} is not the COCO standard 100. "
+                "pycocotools summarises the primary AP at maxDets=100 only, so "
+                "no comparable `ap` exists for this run. The AP50/AP75/AR "
+                "fields are suffixed because they were computed at "
+                f"maxDets={self.max_dets}, not at 100."
+            )
         return data
 
     def summary(self) -> str:
@@ -386,3 +412,27 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
+
+
+# --------------------------------------------------------------------------- #
+# sealed-split guard
+# --------------------------------------------------------------------------- #
+
+_TEST_SPLIT_TOKEN = re.compile(r"(?:^|[_.\-])test(?:[_.\-]|$)", re.IGNORECASE)
+
+
+def names_a_test_split(path: str | os.PathLike[str]) -> bool:
+    """True when ``path`` looks like the sealed test split.
+
+    Matches ``test`` as a whole token anywhere in the basename, so it catches
+    this project's actual convention -- ``instances_test.coco.json`` -- as well
+    as bare ``test.json``.
+
+    The previous check was ``basename.startswith("test")``, which is False for
+    every file this dataset ships: the sealed split is `instances_test.coco.json`
+    and the prefix is `instances`. Both arms' guards were therefore decorative.
+
+    Token boundaries keep it from firing on unrelated names such as
+    ``latest_run.json`` or ``pytest_cache``.
+    """
+    return bool(_TEST_SPLIT_TOKEN.search(os.path.basename(os.fspath(path))))

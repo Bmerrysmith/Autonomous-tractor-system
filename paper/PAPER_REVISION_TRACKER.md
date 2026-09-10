@@ -42,6 +42,7 @@
 - [ ] **"Weeds physically cannot grow on row surfaces"** — Biologically too absolute. Replace with inter-row treatment zone softer framing.
 - [ ] **ROI compute reduction "estimated 30–50%"** — Replace with actual measured number OR remove the claim.
 - [ ] **GNSS drift number** — Ask Krish/Bilal for actual position error (meters) after 20-second outage simulation.
+- [ ] **Comparison against published rice/weed detectors** — deferred by intent until favorable results exist. Protocol, comparability rules and candidate papers live in [BENCHMARK_COMPARISON_PLAN.md](BENCHMARK_COMPARISON_PLAN.md); citations in [references.bib](references.bib). Gate: same-protocol baseline run, threshold frozen on validation, sealed test evaluated once, every number labelled with its IoU threshold and split.
 
 ---
 

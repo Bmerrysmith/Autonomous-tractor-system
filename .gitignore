@@ -63,3 +63,7 @@ package-lock.json
 _archive/historical_docs/reports/
 _archive/historical_docs/images/
 _archive/historical_docs/*.docx
+
+# Generated review artefacts (regenerable from committed generators; ~20 MB of
+# base64-embedded panels). See reports/summaries/ for the findings themselves.
+reports/figures/

@@ -53,7 +53,7 @@ IOU_THRESHOLDS: tuple[float, ...] = (0.5, 0.4, 0.3)
 
 
 def anchor_shapes(
-    base_scale: int = DEFAULT_BASE_SCALE,
+    base_scale: float = DEFAULT_BASE_SCALE,
     aspect_ratios: Sequence[float] = DEFAULT_ASPECT_RATIOS,
     scales: Sequence[float] = DEFAULT_SCALES,
     strides: Sequence[int] = DEFAULT_STRIDES,
@@ -196,7 +196,7 @@ def iter_gt_boxes(coco: dict[str, Any], img_size: int) -> Iterable[dict[str, Any
 def audit(
     ann_file: str | os.PathLike[str],
     img_size: int = DEFAULT_IMG_SIZE,
-    base_scale: int = DEFAULT_BASE_SCALE,
+    base_scale: float = DEFAULT_BASE_SCALE,
     aspect_ratios: Sequence[float] = DEFAULT_ASPECT_RATIOS,
     strides: Sequence[int] = DEFAULT_STRIDES,
 ) -> dict[str, Any]:
@@ -300,7 +300,10 @@ def main(argv: list[str] | None = None) -> int:
         "--img-size", type=int, default=DEFAULT_IMG_SIZE, help="letterbox size (default: 512)"
     )
     parser.add_argument(
-        "--base-scale", type=int, default=DEFAULT_BASE_SCALE, help="anchor base scale (default: 3)"
+        "--base-scale",
+        type=float,
+        default=DEFAULT_BASE_SCALE,
+        help="anchor base scale (default: 3)",
     )
     parser.add_argument(
         "--aspect-ratios",

@@ -68,6 +68,7 @@ from agrinav.inference.postprocess import (
     invert_letterbox,
     to_coco_detections,
 )
+from agrinav.training.run_manifest import atomic_json, finish_run, start_run
 
 SCHEMA_VERSION = "agrinav.baseline_det_control.run.v1"
 
@@ -204,6 +205,8 @@ class EpochRecord:
     val_ap: float | None = None
     lr: float = 0.0
     seconds: float = 0.0
+    eval_metrics: dict[str, float | None] = field(default_factory=dict)
+    eval_protocol: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -213,6 +216,8 @@ class EpochRecord:
             "val_ap": self.val_ap,
             "lr": self.lr,
             "seconds": round(self.seconds, 2),
+            "eval_metrics": self.eval_metrics,
+            "eval_protocol": self.eval_protocol,
         }
 
 
@@ -550,11 +555,27 @@ def train(
             "val_dataset and val_ann_file must be given together: AP needs both the "
             "images and the ground truth they are scored against."
         )
+    # The control arm needs the same sealed-test guard the WeedDet arm has
+    # (weeddet_train.py, `_build_config`). Without it the two arms are not
+    # comparable on the one axis that decides whether a number is publishable:
+    # the baseline could select its `best` checkpoint against the test split
+    # while WeedDet is refused, and nothing would say so.
+    if val_ann_file is not None:
+        from agrinav.evaluation.metrics import names_a_test_split
+
+        if names_a_test_split(val_ann_file):
+            raise BaselineError(
+                f"refusing to validate on {os.fspath(val_ann_file)!r}: "
+                "the test split is sealed and "
+                "must never drive checkpoint selection or threshold choice "
+                "(CLAUDE.md 13.3). Pass the valid split instead."
+            )
 
     out_dir = os.fspath(out_dir)
     os.makedirs(out_dir, exist_ok=True)
     _set_seed(config.seed, config.deterministic)
 
+    external_model = model is not None
     if model is None:
         model = build_model(config)
     model.to(device)
@@ -580,6 +601,25 @@ def train(
     best_epoch: int | None = None
     step = 0
     started = time.time()
+    protocol = {
+        "img_size": config.img_size,
+        "score_threshold": config.score_threshold,
+        "nms_iou": config.nms_iou,
+        "max_detections": config.max_detections,
+        "use_soft_nms": False,
+        "pre_nms_topk": None,
+    }
+    provenance = start_run(
+        config.to_dict(),
+        out_dir,
+        trainer="baseline",
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        val_ann_file=val_ann_file,
+        protocol=protocol,
+        device=device,
+        external_model=external_model,
+    )
 
     for epoch in range(1, config.num_epochs + 1):
         model.train()
@@ -644,12 +684,62 @@ def train(
                 model, val_dataset, val_ann_file, config, device=device
             )
             record.val_ap = float(result.ap)
+            record.eval_metrics = {
+                "val/AP": result.ap,
+                "val/AP50": result.ap50,
+                "val/AP75": result.ap75,
+                "val/AP_small": result.ap_small,
+                "val/AR100": result.ar_100,
+            }
+            for cat_id, value in result.per_category_ap.items():
+                name = result.category_names.get(cat_id, str(cat_id))
+                record.eval_metrics[f"val/AP[{name}]"] = value
+            # Empty categories can return NaN. Preserve unavailability as null,
+            # never as zero or non-standard JSON; the summariser blocks pooling.
+            record.eval_metrics = {
+                key: value if math.isfinite(value) else None
+                for key, value in record.eval_metrics.items()
+            }
+            record.eval_protocol = protocol
             if record.val_ap > best_ap:
                 best_ap, best_epoch = record.val_ap, epoch
-                _save(model, config, os.path.join(out_dir, "baseline_best.pth"), epoch, best_ap)
+                _save(
+                    model,
+                    config,
+                    os.path.join(out_dir, "baseline_best.pth"),
+                    epoch,
+                    best_ap,
+                    provenance=provenance,
+                )
 
         history.append(record)
-        _save(model, config, os.path.join(out_dir, "baseline_last.pth"), epoch, record.val_ap)
+        _save(
+            model,
+            config,
+            os.path.join(out_dir, "baseline_last.pth"),
+            epoch,
+            record.val_ap,
+            provenance=provenance,
+        )
+        weeddet.append_metrics_row(
+            out_dir,
+            {
+                "epoch": epoch,
+                "train/total_loss": train_loss,
+                "run_id": provenance["run_id"],
+                **record.eval_metrics,
+                "eval_protocol": record.eval_protocol,
+            },
+        )
+        atomic_json(
+            os.path.join(out_dir, "status.json"),
+            {
+                "completed": False,
+                "epochs_planned": config.num_epochs,
+                "epochs_completed": epoch,
+                "provenance": provenance,
+            },
+        )
         print(
             f"epoch {epoch}/{config.num_epochs}  loss {train_loss:.4f}"
             + (f"  val/AP {record.val_ap:.4f}" if record.val_ap is not None else "")
@@ -670,6 +760,8 @@ def train(
         "selection_metric": "val/AP" if best_epoch is not None else "none (no validation split)",
         "total_seconds": round(time.time() - started, 2),
         "torch_version": torch.__version__,
+        "provenance": provenance,
+        "completed": True,
     }
     if best_epoch is None:
         run["warning"] = (
@@ -678,14 +770,34 @@ def train(
             "before comparing anything to it."
         )
 
-    with open(os.path.join(out_dir, "run.json"), "w", encoding="utf-8") as handle:
-        json.dump(run, handle, indent=2, sort_keys=True)
+    atomic_json(os.path.join(out_dir, "run.json"), run)
+    finish_run(
+        out_dir,
+        {
+            "completed": True,
+            "epochs_planned": config.num_epochs,
+            "epochs_completed": len(history),
+            "provenance": provenance,
+            "final_train_loss": history[-1].train_loss if history else None,
+        },
+        ["baseline_last.pth", "baseline_best.pth"],
+    )
     return run
 
 
-def _save(model: Any, config: BaselineConfig, path: str, epoch: int, metric: float | None) -> None:
+def _save(
+    model: Any,
+    config: BaselineConfig,
+    path: str,
+    epoch: int,
+    metric: float | None,
+    *,
+    provenance: dict[str, Any] | None = None,
+) -> None:
     """Write a checkpoint carrying enough metadata to be scored later without guessing."""
-    torch.save(
+    from agrinav.models.weeddet_v6b import atomic_torch_save
+
+    atomic_torch_save(
         {
             "schema_version": SCHEMA_VERSION,
             "model": model.state_dict(),
@@ -695,6 +807,7 @@ def _save(model: Any, config: BaselineConfig, path: str, epoch: int, metric: flo
             "epoch": epoch,
             "metric": metric,
             "selection_metric": "val/AP",
+            "provenance": provenance,
         },
         path,
     )

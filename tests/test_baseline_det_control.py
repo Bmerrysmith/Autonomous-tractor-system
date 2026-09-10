@@ -542,6 +542,10 @@ def test_run_record_is_written_and_self_describing(tmp_path):
     checkpoint = torch.load(out_dir / "baseline_last.pth", map_location="cpu", weights_only=False)
     assert checkpoint["class_names"] == ["rice_protect", "weed_target"]
     assert checkpoint["arch"] == config.arch
+    status = json.loads((out_dir / "status.json").read_text())
+    assert status["completed"] is True
+    assert checkpoint["provenance"] == status["provenance"] == record["provenance"]
+    assert "baseline_last.pth" in status["artifact_sha256"]
 
 
 def test_selection_writes_best_on_val_ap(tmp_path):

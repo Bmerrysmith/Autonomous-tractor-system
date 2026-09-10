@@ -94,7 +94,30 @@ _HARD_DEFAULTS: dict[str, Any] = {
     "use_amp": None,  # None -> resolved to cuda-availability
     "use_ema": True,
     "ema_decay": 0.999,
-    "grad_clip": 0.5,
+    # Backstop against one pathological batch, NOT a step-size control.
+    #
+    # Was 0.5, which configs/training/detector_rice_phase2.yaml already overrode
+    # to 100.0 on the evidence in docs/GATE_STATUS.md -- 0.5 clipped 100% of
+    # steps in every regime this project ever recorded, a 10-16x truncation at
+    # the median. The code default was never updated to match, so anything that
+    # did not load that config -- notably the overfit gate -- kept running at
+    # the value the project had already rejected.
+    #
+    # This matters more after the 2026-08-28 assigner fix: correct assignment
+    # yields ~9x fewer positives, so the num_pos-normalised loss and its
+    # gradients grow by roughly the same factor. Measured on the gate fixture,
+    # the 2-epoch loss drops at 100.0 and rises at 0.5.
+    "grad_clip": 100.0,
+    # What a positive anchor is trained to predict:
+    #   'hard'       -> 1.0 regardless of box quality (historical default)
+    #   'anchor_iou' -> anchor-to-GT assignment IoU
+    #   'pred_iou'   -> IoU(predicted box, GT), i.e. VarifocalNet's IACS
+    # See WeedDetLoss for the measured consequences and the atss_all_neg
+    # interaction. Vary this alone.
+    "cls_target_mode": "hard",
+    "cls_loss_mode": "legacy",
+    "head_norm": "batch",
+    "atss_candidate_mode": "cells_best_shape",
     "checkpoint_dir": "checkpoints/weeddet",
     "class_names": list(DEFAULT_CLASS_NAMES),
     "augment": True,
@@ -109,6 +132,12 @@ _HARD_DEFAULTS: dict[str, Any] = {
     # improve while detections get worse -- but it needs the canonical decode
     # over the whole val split, so its cost is made explicit rather than hidden.
     "val_ap_interval": 0,
+    # Explicit evaluation settings; legacy Soft-NMS remains the default.
+    "val_use_soft_nms": True,
+    "val_score_threshold": 0.05,
+    "val_nms_iou": 0.5,
+    "val_max_detections": 100,
+    "val_pre_nms_topk": 2000,
     # 'auto' keeps the historical coupling (freeze BN for ImageNet, trainable
     # for an injected backbone); set explicitly to make the A/B single-factor.
     "bn_policy": "auto",
@@ -160,11 +189,15 @@ _CLI_TO_CONFIG: dict[str, str] = {
     "val_images_root": "val_images_root",
     "val_batch_size": "val_batch_size",
     "val_ap_interval": "val_ap_interval",
+    "val_use_soft_nms": "val_use_soft_nms",
     "bn_policy": "bn_policy",
     "bn_freeze_scope": "bn_freeze_scope",
     "parity_probe_images": "parity_probe_images",
     "dump_grad_norms": "dump_grad_norms",
     "grad_clip": "grad_clip",
+    "cls_target_mode": "cls_target_mode",
+    "cls_loss_mode": "cls_loss_mode",
+    "head_norm": "head_norm",
     "resume": "resume",
 }
 
@@ -423,7 +456,9 @@ def build_config(args: argparse.Namespace) -> dict[str, Any]:
         )
     if val_ann is not None and val_root is not None:
         val_ann, val_root = os.fspath(val_ann), os.fspath(val_root)
-        if os.path.basename(val_ann).startswith("test"):
+        from agrinav.evaluation.metrics import names_a_test_split
+
+        if names_a_test_split(val_ann):
             raise ValueError(
                 f"refusing to validate on {val_ann!r}: the test split is sealed and "
                 "must never drive checkpoint selection or threshold choice "
@@ -549,7 +584,12 @@ def run_overfit(args: argparse.Namespace) -> int:
     )
 
     pretrained = (not args.no_pretrained_backbone) and torch.cuda.is_available()
-    model = _WD.WeedDet(num_classes=len(class_names)).to(device)
+    model = _WD.WeedDet(
+        num_classes=len(class_names),
+        cls_target_mode=getattr(args, "cls_target_mode", None) or "hard",
+        cls_loss_mode=getattr(args, "cls_loss_mode", None) or "legacy",
+        head_norm=getattr(args, "head_norm", None) or "batch",
+    ).to(device)
     if pretrained:
         _WD.load_imagenet_backbone(model)
     bn_scope = "imagenet" if pretrained else None
@@ -736,9 +776,20 @@ def load_checkpoint_model(
     except (pickle.UnpicklingError, RuntimeError, AttributeError):
         _alias_legacy_pickle_names()
         checkpoint = torch.load(path, map_location=device, weights_only=False)
+    saved = checkpoint.get("config", {})
     if num_classes is None:
-        num_classes = int(checkpoint.get("config", {}).get("num_classes", 1))
-    model = _WD.WeedDet(num_classes=num_classes)
+        num_classes = int(checkpoint.get("num_classes", saved.get("num_classes", 1)))
+    model = _WD.WeedDet(
+        num_classes=num_classes,
+        anchor_base_scale=saved.get("anchor_base_scale", 3),
+        lsc_k=saved.get("lsc_k", 7),
+        use_atss=saved.get("use_atss", True),
+        cls_target_mode=saved.get("cls_target_mode"),
+        vfl_use_pred_iou=saved.get("vfl_use_pred_iou", False),
+        atss_candidate_mode=saved.get("atss_candidate_mode", "cells_best_shape"),
+        cls_loss_mode=saved.get("cls_loss_mode", "legacy"),
+        head_norm=saved.get("head_norm", "batch"),
+    )
     state = checkpoint.get("state_dict", checkpoint)
     model.load_state_dict(state)
     model.to(device).eval()
@@ -854,6 +905,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "stats exist and leaves it trainable for an injected backbone; set it "
         "explicitly to keep an ImageNet-vs-RiceSEG A/B single-factor",
     )
+    parser.add_argument("--cls-loss-mode", choices=("legacy", "varifocal"), default=None)
+    parser.add_argument("--head-norm", choices=("batch", "group"), default=None)
+    parser.add_argument(
+        "--val-hard-nms",
+        dest="val_use_soft_nms",
+        action="store_false",
+        default=None,
+        help="use hard NMS during training validation (legacy default: Soft-NMS)",
+    )
     parser.add_argument(
         "--bn-freeze-scope",
         default=None,
@@ -949,6 +1009,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--num-workers", type=int, default=None, help="DataLoader workers (default: 2)"
+    )
+    parser.add_argument(
+        "--cls-target-mode",
+        default=None,
+        choices=("hard", "anchor_iou", "pred_iou"),
+        help="classification target for POSITIVE anchors. 'hard' (default) "
+        "trains every positive to 1.0, so the score carries no localisation "
+        "quality; 'anchor_iou' uses the assignment IoU; 'pred_iou' is "
+        "VarifocalNet's IACS. Changes what the score means to NMS and to COCO "
+        "AP -- vary it alone, against a locked assigner and evaluator",
     )
     parser.add_argument(
         "--save-every", type=int, default=None, help="periodic checkpoint epoch stride"

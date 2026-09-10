@@ -172,6 +172,9 @@ def test_completed_run_writes_terminal_artifacts(tmp_path):
 
     last = torch.load(ckpt_dir / "weeddet_last.pth", map_location="cpu", weights_only=True)
     assert last["epoch"] == 2, "weeddet_last.pth must hold the final epoch"
+    assert last["provenance"] == status["provenance"]
+    assert (ckpt_dir / status["provenance"]["manifest_file"]).is_file()
+    assert "weeddet_last.pth" in status["artifact_sha256"]
 
 
 def test_metrics_jsonl_has_one_row_per_epoch(tmp_path):
@@ -403,6 +406,9 @@ def test_nonfinite_loss_aborts_with_actionable_message(tmp_path, monkeypatch):
     monkeypatch.setattr(wd.WeedDet, "forward", _nan_forward)
     with pytest.raises(RuntimeError, match="non-finite training loss"):
         wd.train_with_progress(_tiny_config(tmp_path, dataset))
+    status = json.loads((tmp_path / "ckpt" / "status.json").read_text())
+    assert status["completed"] is False
+    assert (tmp_path / "ckpt" / status["provenance"]["manifest_file"]).exists()
 
 
 class _FakeFullBackboneInit:

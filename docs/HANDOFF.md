@@ -17,6 +17,268 @@ It is intentionally short: a *pointer*, not a log. Detailed history lives in git
 
 ---
 
+## Current status — 2026-09-09
+
+Executing the detector-first publication campaign:
+[plan and progress](research/DETECTOR_CAMPAIGN_2026-09-09.md), with current verdicts
+in [GATE_STATUS.md](GATE_STATUS.md). GitHub audit is outside the checkout at
+`../GITHUB_REVIEW_2026-09-09.md` relative to the repository root.
+
+Done: both trainers record immutable launch evidence and checkpoint/metric hashes;
+research aggregation rejects incompatible or incomplete runs; standalone loading
+now honors anchor scale and head configuration; separate Varifocal and head
+GroupNorm options preserve legacy defaults. Full CPU suite passed 689 tests and
+16 subtests; subsequent focused runs passed 64 and 80 tests. No campaign validation
+results have been produced by this work yet.
+
+Diagnostics: nine resource pilots fit GPU memory. The historical sixteen-image
+gate has rice annotations only. Its incumbent failure is localized to head BN
+running statistics. On a separate both-class subset, Varifocal passes and head
+GroupNorm misses recall. Saved checkpoint metrics and artifact hashes are verified.
+Default model behavior matches pre-campaign HEAD in bounded CPU checks. Evidence,
+limitations, and budget are in the [diagnostics report](../reports/summaries/detector_diagnostics_2026-09-09.md).
+Full training epochs take 95.00 s (WeedDet 512/b8), 99.15 s (512/b4),
+142.97 s (640/b4), and 91.38 / 106.65 s (Faster R-CNN 512/640, b4).
+46.02 diagnostic minutes used. The [analysis protocol](research/DETECTOR_ANALYSIS_PROTOCOL_2026-09-09.md)
+and [IEEE preparation note](research/IEEE_PREPARATION_2026-09-09.md) are ready for review.
+
+Data: no-write preflight passed. All 24 re-derived cross-split groups remain
+unresolved capture provenance; three also merge filename forms. No cross-split
+byte or decoded-pixel duplicates found. A balanced 100-object human review is
+prepared outside Git at `../audit_artifacts/detector_campaign_2026-09-09/object_review.html`.
+Version 2 preserves the same objects and adds full-image missed-label review,
+with all existing boxes visible. Review judgments are still pending. The
+review-export validator passes twelve synthetic checks and verifies sample/image identities; it has generated no human
+judgments. Finish runtime/source locks before screening; current decisions live in GATE_STATUS.md.
+
+Preserve the user's existing edits to `docs/baselines.md` and untracked Claude
+skills. Reviewed infrastructure source is commit `979627a`; campaign documentation
+is committed as `0052264`. Both are pushed in
+[draft PR #6](https://github.com/Bmerrysmith/Autonomous-tractor-system/pull/6),
+awaiting GitHub checks and upstream review. All four
+paper READMEs and PROVENANCE.md files have local corrections and this infrastructure
+pin, keeping the original snapshot and historical result provenance explicit.
+Paper-repository changes remain uncommitted. Navigation stays separate.
+
+GitHub follow-up: two gate-unit tests depended on a random detector's two-step
+loss decrease; CPU fixtures also implicitly selected ImageNet when CUDA was
+available. Their fixtures now use explicit scratch initialization and controlled
+loss trajectories for verdict tests, including flat/rising-loss rejection. Real
+training/decode tests remain; 31 focused checks pass. Production code and gate
+thresholds are unchanged. Qodana separately fails before scanning because its
+cloud server rejects the configured token/license; restore that credential/license
+and rerun. See PR checks for current CI status.
+
+## Previous status — 2026-09-01
+
+**Environment changed: the GPU is usable.** `torch 2.13.0+cu130` /
+`torchvision 0.28.0+cu130`, `cuda_available True`, RTX 4070 12 GB, driver 595.71.
+**cu130 is the only Windows CUDA build of torch 2.13.0** — cu129 is Linux-only,
+cu128 does not exist for this version. This diverges from CI, which installs the
+CPU wheels. Docker Desktop is installed (Compose v5.4.0); its daemon does not
+start until the first-launch license dialog is accepted.
+
+**The CVAT export gap is closed.** `agrinav data-cvat-to-records`
+(`src/agrinav/data/cvat_export_to_records.py`, 38 tests) converts a CVAT COCO
+export into `annotation_record.v1` JSONL that `data-validate` accepts — verified
+end to end on real `split_membership.json` rows. `record_id` is derived from
+dataset/version/image/hash so a re-review updates a row instead of orphaning it;
+the manifest wins over the COCO file; missing review metadata yields explicit
+nulls, never invented identities.
+
+Two limits found while building it, both corrections to the 2026-08-21 entry
+below:
+1. **CVAT's COCO 1.0 export drops the `image_review` tag** (it writes
+   `coco_instances` only). `review_status`, `verified_empty` and `unusable`
+   therefore cannot leave CVAT that way — without a `--review-metadata` sidecar
+   from the REST API, every converted record is `unreviewed` and every
+   `verified_empty` is `null`. Scripting that sidecar is now the top open item.
+2. **`annotation_confidence` is an unresolved ontology/schema conflict.** The
+   CVAT label spec gives it no default (never record a confidence the annotator
+   did not state); the wire format has no null for it. The converter hard-errors
+   naming image and object. Needs a decision — see Open items.
+
+**Roboflow has nothing worth exporting.** A read-only enumeration of all 7
+projects / 20,489 images found every one already on local disk: no new field,
+growth stage, lighting, or uncovered weed class, and no augmentation anywhere in
+the workspace. Full inventory:
+`reports/summaries/roboflow_inventory_2026-08-31.md`. Two useful by-products: the
+`.rf.<hash>` filename suffix **is** the Roboflow image id (an exact join key,
+which confirmed 13/13 sampled grouped-split assignments), and rice-weed-seg's
+polygons were uploaded 2026-07-22 — one day after the planted-artifacts note —
+with no provenance exposed by the API. Do not import them until traced.
+
+**The clean-test-split lead is local, not Roboflow:** `extracted/riceseg` —
+per-pixel expert masks over 5 countries and 19 folder-level sites. It carries
+**weed labels** (`riceseg_masks_to_coco.py` maps semantic 4 → `weed_target`,
+5 → `non_target_aquatic`; weed present in 1,295 of 3,078 masks). **Four
+preconditions** on using a site-held-out portion as an external test set — all
+four must hold, and they are the same four listed in the comparison README §4,
+which is canonical:
+
+1. **Freeze the split manifest and image hashes before training starts.**
+2. **Use no RiceSEG-derived weights**, or retrain the backbone with the held-out
+   sites excluded. Phase-1 pretraining ran over all 3,078 tiles (2,769 train /
+   309 val) and `detector_rice_phase2.yaml` warm-starts from that backbone via
+   `--riceseg-backbone`, so a detector initialised from those weights has
+   already seen every tile. Warm-starting and then testing on RiceSEG tiles is
+   not a measurement.
+3. **Audit the semantic-component-to-instance conversion by hand** before any
+   derived box counts as ground truth — connected components merge touching
+   plants and split occluded ones.
+4. **Report per class and per scale.** AP/AR for `rice_protect`, `weed_target`,
+   `non_target_aquatic`; background is not a class and has no AP — report
+   background rejection separately via false-positive metrics.
+
+Splitting constraint that shapes all four: 3,078 RGB tiles come from **773
+source photographs**, **693** of them multi-tile, max **52** tiles from one
+photo, so the split must group by source photograph. India, Philippines and
+Tanzania have one site directory each, so site-holdout there is
+country-holdout.
+
+Comparison folder with all datasets side by side, the metrics, and the six-test
+usefulness rule: `C:\Users\Benny Merr\agrinav_data\phase2_comparison\README.md`
+(junctions, not copies).
+
+**The SAM re-seed pilot ran twice; the second result reversed the first.** The
+stage's 8 candidates never included `multimask_output=False` on the unjittered
+box — the configuration SAM recommends for an unambiguous box prompt. With that
+ninth candidate appended (`kind="single_mask"`, verified append-only: all 10,240
+original candidates byte-identical across the two shards):
+
+| median, n=1,238 | legacy | new:MM (broken) | new:SM (fixed) |
+|---|---:|---:|---:|
+| box IoU vs human box | 0.759 | 0.711 | **0.774** |
+| containment | **0.985** | 0.939 | 0.978 |
+| outside-box leakage | **0.0153** | 0.0611 | 0.0225 |
+| multi-component rate | **2.0%** | 22.5% | 13.6% |
+| beats legacy | — | 36.3% | **56.9%** |
+
+`weed_target` (n=195) goes 0.699 → 0.741, winning on 63.6%; small objects
+(<32², 37.8% of the corpus) gain +0.0235. **Better localisation, messier
+shapes** — legacy still wins containment, leakage and especially fragmentation
+on every slice (4.1% vs 29.2% multi-component on weeds).
+
+**The fragmentation figure is less alarming than it reads.** Measured across all
+1,280 masks: of 945 extra components, **89.9% are <1% of their mask's area**, and
+the median area outside the largest component is **0.57%**. Only **27 of 1,238**
+objects have ≥5% outside it. A largest-component rule would clean the median
+fragmented mask for free; the open question is only whether the substantial extra
+structure on that ~2% is *real* — first inspection suggests it is (the new mask
+captured two blades of one weed clump where legacy captured one).
+
+So the decision rests on ~2% of objects, and a blinded, stratified side-by-side
+sheet exists to settle it:
+`reports/figures/sam_reseed_review_2026-09-01.html` (89 objects, both
+substantial-fragment strata taken whole, key in a sibling
+`.BLINDING_KEY.json`). The metric that would really decide it —
+`median_human_seconds_per_accepted_image` — needs corrections timed in CVAT, so
+it is gated behind Docker. Full run ETA is now **72.2 min** (68–75), peak GPU
+unchanged at 0.910 GiB.
+
+**Trap found while building the sheet, now recorded in
+`reports/summaries/dataset_comparison_2026-08-31.md` §2:** annotation ids are
+**not unique across the split files** — each `instances_<split>.coco.json`
+restarts at 1, in the rebuild as well as the legacy set (15,226 train↔valid
+collisions, 6,284 test↔train). Legal COCO, but any join on a bare annotation id
+silently returns the wrong object on the wrong image. Key on `(split, id)` and
+assert the resolved box.
+
+Two corrections to the file itself: its docstring claimed "8 decoder-only
+passes" when it was actually 6 passes producing 8 candidates (one
+`multimask_output=True` call returns three masks); it is now 7 and 9, both
+derived constants rather than literals. And `tests/test_sam_box_to_mask.py` is
+new — it supplies the `make_stub_predictor` the module docstring had always
+advertised but which never existed, so the documented CPU path could not run and
+the stage's safety invariants had no test at all.
+
+Reports: `reports/summaries/sam_reseed_repilot_2026-09-01.md` (current);
+`sam_reseed_pilot_2026-08-31.md` carries a supersession banner so its
+"do not run" conclusion cannot be read as current.
+
+**Two defects found in existing code, both verified here:**
+- **`optimize_proposals` does not exist.** Referenced from `triage_proposals.py`
+  (two code sites), `compare_sam_polygons.py`, and recorded in
+  `sam_box_to_mask.py` as `"candidate_selection": "deferred_to_optimize_proposals"`.
+  SAM emits 8 candidates per box and defers selection to a stage nobody wrote, so
+  raw JSONL cannot become importable COCO polygons. **The CVAT path is blocked by
+  this, not by GPU hours.**
+- **The model pin did not pin — fixed 2026-09-01.** `default_predictor_factory`
+  passed `revision` to `SAM2ImagePredictor.from_pretrained`, which never
+  forwarded it to `hf_hub_download`; a run would have fetched current `main`
+  while recording the pinned sha. It now routes through `transformers` and
+  validates the revision at factory-construction time, with mocked tests proving
+  the revision reaches both `from_pretrained` calls. Note the trap recorded in
+  those tests: patching `transformers.Sam2Model` directly **passes vacuously**,
+  because `transformers` is a `_LazyModule` and the patch does not survive a
+  later `from transformers import Sam2Model`.
+
+**Dataset re-measured from scratch**
+(`reports/summaries/dataset_comparison_2026-08-31.md`). The rebuild is sound and
+strictly better than both older arrangements: 0 degenerate boxes (vs 2), 0
+duplicate-pixel and 0 filename leakage, 214 EXIF images normalized. HANDOFF's
+contamination figures reproduce exactly (231/261 = 88.5%, 233 missing), and
+**1,173 of 2,579 images (45.5%) sit in a different split than Roboflow assigned**.
+Two things to know: **37.8% of all boxes are COCO-small (<32²)**, so aggregate AP
+will hide where the failures are; and the **"3 straddling groups" figure in the
+2026-07-29 entry below is not reproducible** from any artifact the dataset ships
+— the re-derived `group_id` yields 115 groups with 24 straddling, while
+`grouped_split.json` records 68. `provenance.json` states plainly that
+`group_id` is re-derived and "not the provenance of the train/valid assignment",
+so this is not evidence of leakage — but group integrity on non-sequence families
+remains *unproven*, and that figure should be corrected or sourced.
+
+## Current status — 2026-08-21
+
+**CVAT is set up as the annotation/review tool, but not yet running.** Docker is
+not installed on this machine (no `docker` binary, no Docker Desktop; a stale
+`docker-desktop` WSL distro is left over from a previous install). WSL2 Ubuntu is
+present, 674 GB free. Installing Docker Desktop is a user action and is step 1 of
+[`docs/cvat.md`](cvat.md).
+
+Landed this session:
+
+- **`agrinav data-cvat-labels`** (`src/agrinav/data/cvat_labels.py`, 33 tests) —
+  generates the CVAT label spec from `data/ontology.v1.json` instead of anyone
+  typing labels into the web UI, where they would become an unversioned second
+  copy of the ontology. Three rules survive the translation: nullable booleans
+  (`verified_empty`, `treatment_eligible`) become three-valued selects rather
+  than checkboxes, because a checkbox exports an untouched attribute as `false`
+  — the forbidden inference "model returned no boxes ⇒ verified_empty";
+  `annotation_confidence` gets no default; and `--geometry rectangle` is refused
+  without `--allow-non-canonical-geometry`, because no canonical label lists a
+  box geometry. Tests pin the spec against
+  `data/schemas/annotation_record.v1.schema.json`, so an attribute CVAT collects
+  that the wire format cannot hold fails CI.
+- **`deploy/cvat/`** — `docker-compose.override.yml` and `.env.example`. Five
+  read-only bind mounts under `/home/django/share`, one per distinct dataset,
+  across the five services that read task files: **18,233 files / 2.69 GB**
+  (RICE train 1,800 + valid 518, RiceSEG 6,156, rice-plant masks 5,391, BD weed
+  V3 4,368). Nothing is copied — the images stay where they live and CVAT tasks
+  reference them. One bind per dataset rather than one bind of a parent, because
+  the parents also hold ~17 GB of copies: the sealed 261-image test split, the
+  native-Roboflow-split copy of the same RICE images, the 1,347-image RICE
+  subset, weed V4 (subset of V3), and the 1,761 Git-LFS stubs. The mount table
+  and the exclusion list with reasons are in [`docs/cvat.md`](cvat.md) §3.
+  Deliberately binds, not the named-volume form in CVAT's own guide, which
+  caches the device path and keeps mounting the old directory after the path
+  changes (cvat-ai/cvat #6113, #6698).
+- **[`docs/cvat.md`](cvat.md)** — install, share layout, project/task/job
+  organization, label loading, COCO import, and the export gap below.
+
+**The blocking gap: a CVAT COCO export cannot yet be validated.**
+`agrinav data-validate` reads `agrinav.annotation_record.v1` JSONL, not COCO, and
+no converter exists. The label spec is built so that converter can be mechanical
+(every attribute maps to a schema field, `null` is the empty default), but it
+still has to supply `record_id`, `source_image_sha256`, the `source` block, and
+`review.annotator_id`/`reviewer_id` from the CVAT REST API. Until it exists, a
+CVAT export is reviewed work in a holding format, not truth.
+
+No data has been imported into CVAT (the stack cannot start yet), and nothing
+about the gate status below changed. The `weed_species_v3` mount is 11-way
+species classification, **not** the `rice_protect`/`weed_target` decision
+ontology — it needs its own written task definition before anyone annotates it.
+
 ## Current status — 2026-07-29
 
 **Go/no-go now lives in one file: `docs/GATE_STATUS.md`.** This file stays the
@@ -421,6 +683,39 @@ ruff check . && black --check .
 
 ## Open items (needs owner / decision)
 
+- [x] ~~Install Docker Desktop~~ — **DONE 2026-08-31**. Daemon needs the
+      first-launch license dialog accepted before it starts.
+- [x] ~~Write the CVAT-COCO → `annotation_record.v1` converter~~ — **DONE
+      2026-09-01**, `agrinav data-cvat-to-records`, 38 tests.
+- [ ] **Two failing tests in the detector overfit gate.** Full suite is 581
+      passed / 2 failed: mocked "good metrics" tests expect success, but the gate
+      also rejects a deterministic loss increase (5.0077 → 5.0471) in
+      `src/agrinav/training/weeddet_train.py`. Either the gate or the fixtures is
+      wrong; decide which.
+- [ ] **Audit the semantic-component-to-instance policy** before any RiceSEG- or
+      rice-plant-derived box is used as evaluation ground truth.
+- [ ] **Give `preflight` a no-write / external-report option.**
+      `build_rice_phase2.preflight()` writes `reports/preflight.json` into its
+      `out_root` unconditionally (line ~1063), so verifying a dataset mutates it.
+      There is no way to point the report elsewhere, and a junction is the same
+      storage as its target, so no path trick avoids it. Until then, verify
+      against a disposable copy.
+- [ ] **Decide `annotation_confidence`.** The CVAT spec gives it no default; the
+      wire schema has no null for it; the converter hard-errors. Either the
+      annotation guide requires the field before a job can close, or the ontology
+      gains an explicit "unstated" member. Blocks any real review round.
+- [ ] **Script the CVAT review-metadata sidecar from the REST API.** Without it
+      no CVAT export can ever become truth, because the COCO export drops the
+      image-level tag.
+- [ ] **Write `optimize_proposals`** (referenced by three modules, absent). It
+      selects one candidate per box from SAM's 8 and is what turns raw candidate
+      JSONL into importable COCO polygons. Blocks the CVAT import path.
+- [x] ~~Fix the SAM model-pin defeat~~ — **DONE 2026-09-01**; the factory now
+      routes through `transformers` and validates the revision before loading.
+- [ ] **Decide the SAM re-seed** on the blinded review sheet: the fixed config
+      localises better (0.774 vs 0.759 box IoU, 0.741 vs 0.699 on `weed_target`)
+      but fragments more (13.6% vs 2.0% multi-component). 72 min of GPU either
+      way; the question is reviewer clicks, not compute.
 - [x] ~~Run full `ImageNet->RiceSEG` pretraining~~ — **DONE 2026-07-23**, best
       mIoU 0.5827 @ ep30. Phase closed; see results log for why it was not
       extended.

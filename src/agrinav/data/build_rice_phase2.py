@@ -903,7 +903,59 @@ def _dump_json(path: str, payload: Any) -> None:
 # --------------------------------------------------------------------------- #
 # Preflight
 # --------------------------------------------------------------------------- #
-def preflight(out_root: str, *, split_manifest: str | None = None) -> dict[str, Any]:
+def _resolve_report_destination(
+    out_root: str, *, report_path: str | None, no_report: bool
+) -> tuple[str | None, str]:
+    """Decide where the preflight report goes, and how to describe that.
+
+    Verifying a dataset should not have to modify it: a read-only or
+    checksum-pinned tree, and a build being verified while something else reads
+    it, both break if preflight writes into ``out_root``.
+
+    Args:
+        out_root: the dataset being verified.
+        report_path: write the report here instead of inside ``out_root``.
+        no_report: write no report at all.
+
+    Returns:
+        ``(destination, description)``. ``destination`` is ``None`` when nothing
+        will be written; ``description`` is what the failure message should say
+        so it never names a file that does not exist.
+
+    Raises:
+        BuildError: if both options are given. They ask for opposite things and
+            silently honouring one would leave (or not leave) a file the caller
+            did not expect.
+    """
+    if no_report and report_path is not None:
+        raise BuildError(
+            "--no-report and --report-path are mutually exclusive: the first asks for no "
+            f"report at all, the second asks for one at {report_path!r}. Pass --report-path "
+            "alone to write the report outside the dataset, or --no-report alone to verify "
+            "without writing anything."
+        )
+    if no_report:
+        return None, "no report was written (--no-report)"
+    if report_path is not None:
+        external = os.path.abspath(report_path)
+        return external, external
+    # Historical default, preserved exactly: write inside the dataset, but only
+    # when it already has a reports/ directory (an extracted training archive
+    # may not).
+    reports_dir = os.path.join(out_root, "reports")
+    if not os.path.isdir(reports_dir):
+        return None, f"no report was written ({reports_dir} does not exist)"
+    default = os.path.join(reports_dir, "preflight.json")
+    return default, default
+
+
+def preflight(
+    out_root: str,
+    *,
+    split_manifest: str | None = None,
+    report_path: str | None = None,
+    no_report: bool = False,
+) -> dict[str, Any]:
     """Re-verify a built dataset from disk. Independent of the build's own state.
 
     Checks, per split: every COCO image exists on disk, its bytes hash to the
@@ -916,14 +968,27 @@ def preflight(out_root: str, *, split_manifest: str | None = None) -> dict[str, 
         out_root: a directory produced by :func:`build`.
         split_manifest: optional ``grouped_split.json`` to compare membership
             against. Defaults to the path recorded in ``manifests/provenance.json``.
+        report_path: write the report here instead of into ``out_root``. Nothing
+            is written inside ``out_root``, so the dataset is left untouched.
+        no_report: write no report anywhere. Mutually exclusive with
+            ``report_path``.
 
     Returns:
-        The preflight report (also written to ``reports/preflight.json``).
+        The preflight report. By default it is also written to
+        ``<out_root>/reports/preflight.json`` when that directory exists; see
+        ``report_path`` and ``no_report`` to send it elsewhere or nowhere.
 
     Raises:
-        BuildError: on the first category of failure found, listing examples.
+        BuildError: on the first category of failure found, listing examples, or
+            if ``report_path`` and ``no_report`` are combined.
     """
     from PIL import Image
+
+    # Resolved first: an impossible combination should fail before minutes of
+    # hashing, not after.
+    report_destination, report_description = _resolve_report_destination(
+        out_root, report_path=report_path, no_report=no_report
+    )
 
     provenance_path = os.path.join(out_root, "manifests", "provenance.json")
     provenance: dict[str, Any] = {}
@@ -1058,15 +1123,14 @@ def preflight(out_root: str, *, split_manifest: str | None = None) -> dict[str, 
         "failure_counts": {key: len(values) for key, values in failures.items()},
         "passed": not failures,
     }
-    reports_dir = os.path.join(out_root, "reports")
-    if os.path.isdir(reports_dir):
-        _dump_json(os.path.join(reports_dir, "preflight.json"), report)
+    if report_destination is not None:
+        _dump_json(report_destination, report)
     if failures:
         summary = "; ".join(f"{key}={len(values)}" for key, values in sorted(failures.items()))
         example = next(iter(failures.values()))[0]
         raise BuildError(
             f"preflight FAILED for {out_root!r}: {summary}. First example: {example}. "
-            "Full report: reports/preflight.json"
+            f"Full report: {report_description}"
         )
     return report
 
@@ -1217,6 +1281,16 @@ def main(argv: list[str] | None = None) -> int:
     check_parser = sub.add_parser("preflight", help="verify an existing build from disk")
     check_parser.add_argument("--out-root", required=True)
     check_parser.add_argument("--split-manifest", default=None)
+    check_parser.add_argument(
+        "--report-path",
+        default=None,
+        help="write the report here instead of into --out-root (leaves the dataset untouched)",
+    )
+    check_parser.add_argument(
+        "--no-report",
+        action="store_true",
+        help="write no report at all; verify without modifying anything",
+    )
 
     pack_parser = sub.add_parser("package", help="zip a verified build for upload")
     pack_parser.add_argument("--out-root", required=True)
@@ -1244,7 +1318,12 @@ def main(argv: list[str] | None = None) -> int:
                 result = preflight(args.out_root, split_manifest=args.split_manifest)
                 print(f"  preflight: PASSED ({result['counts']})")
         elif args.action == "preflight":
-            result = preflight(args.out_root, split_manifest=args.split_manifest)
+            result = preflight(
+                args.out_root,
+                split_manifest=args.split_manifest,
+                report_path=args.report_path,
+                no_report=args.no_report,
+            )
             print(f"preflight PASSED for {result['out_root']}")
             for split, counts in result["counts"].items():
                 print(f"  {split:<7}{counts}")

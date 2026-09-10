@@ -32,10 +32,13 @@ COMMANDS: dict[str, str] = {
     "data-coco-to-proposals": "agrinav.data.coco_boxes_to_proposals",
     "data-locateanything": "agrinav.data.locateanything_to_proposals",
     "data-sam-mask": "agrinav.data.sam_box_to_mask",
+    "data-optimize-proposals": "agrinav.data.optimize_proposals",
     "data-triage": "agrinav.data.triage_proposals",
     "data-pilot": "agrinav.data.build_annotation_pilot",
     "data-anchor-audit": "agrinav.data.anchor_audit",
     "data-build-rice-phase2": "agrinav.data.build_rice_phase2",
+    "data-cvat-labels": "agrinav.data.cvat_labels",
+    "data-cvat-to-records": "agrinav.data.cvat_export_to_records",
     # --- training ---
     "pretrain": "agrinav.training.riceseg_pretrain",
     "baseline-seg": "agrinav.training.baseline_seg_control",
@@ -44,6 +47,7 @@ COMMANDS: dict[str, str] = {
     # --- evaluation ---
     "evaluate": "agrinav.evaluation.metrics",
     "evaluate-detector": "agrinav.evaluation.runner",
+    "run-summary": "agrinav.evaluation.run_summary",
 }
 
 

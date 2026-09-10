@@ -48,6 +48,7 @@ Single-class rice config (AgriNav):
 import json
 import math
 import os
+import sys
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -728,13 +729,15 @@ class eFPN(nn.Module):
 
 class LargeSeparableConv(nn.Module):
     """Decomposes k×k conv into k×1 then 1×k. Default k=7 (from paper ablation)."""
-    def __init__(self, ch, k=7):
+    def __init__(self, ch, k=7, norm='batch'):
         super().__init__()
+        if norm not in ('batch', 'group'):
+            raise ValueError(f'head_norm={norm!r} must be batch or group')
         self.seq = nn.Sequential(
             nn.Conv2d(ch, ch, (k, 1), padding=(k//2, 0), groups=ch, bias=False),
             nn.Conv2d(ch, ch, (1, k), padding=(0, k//2), groups=ch, bias=False),
             nn.Conv2d(ch, ch, 1, bias=False),
-            nn.BatchNorm2d(ch),
+            nn.BatchNorm2d(ch) if norm == 'batch' else nn.GroupNorm(32, ch),
             nn.ReLU(inplace=True),
         )
 
@@ -744,19 +747,27 @@ class LargeSeparableConv(nn.Module):
 
 class ERetinaHead(nn.Module):
     """Efficient Retina Head: 1 conv (64ch) + LSC instead of 4 convs (256ch)."""
-    def __init__(self, in_ch=256, num_classes=1, num_anchors=9, lsc_k=7):
+    def __init__(self, in_ch=256, num_classes=1, num_anchors=9, lsc_k=7,
+                 head_norm='batch'):
         super().__init__()
         mid = 64
         self.shared = nn.Sequential(
             nn.Conv2d(in_ch, mid, 3, padding=1),
             nn.ReLU(inplace=True),
-            LargeSeparableConv(mid, lsc_k),
+            LargeSeparableConv(mid, lsc_k, norm=head_norm),
         )
         self.cls_head = nn.Conv2d(mid, num_classes * num_anchors, 3, padding=1)
         self.reg_head = nn.Conv2d(mid, 4 * num_anchors, 3, padding=1)
 
+        # RetinaNet initialises BOTH output convs at std 0.01 and only the
+        # classification BIAS from the prior. This head previously left
+        # cls_head.weight at PyTorch's kaiming_uniform default -- expected std
+        # ~0.0241 for a 3x3 over 64 channels, i.e. 2.4x the regression head --
+        # so the prior_prob bias was fighting a noisier weight init than the
+        # calculation assumes.
         prior_prob = 0.01
         bias_val = -math.log((1 - prior_prob) / prior_prob)
+        nn.init.normal_(self.cls_head.weight, std=0.01)
         nn.init.constant_(self.cls_head.bias, bias_val)
         nn.init.normal_(self.reg_head.weight, std=0.01)
         nn.init.zeros_(self.reg_head.bias)
@@ -791,6 +802,18 @@ class AnchorGenerator(nn.Module):
         self.scales        = scales
         self.strides       = strides
         self.num_anchors_per_level = []
+        # Anchor shapes co-located at one grid cell. `_make_anchors` emits them
+        # in ratio-major, scale-minor order and `forward` reshapes to
+        # [cell, shape, 4] -> flat, so anchor index == cell_index * num_shapes
+        # + shape_index, exactly.
+        #
+        # This is STRUCTURAL and must never be re-derived by comparing anchor
+        # centres for equality. That is what the pre-2026-08-28 assigner did,
+        # and `(x1 + x2) * 0.5` is not exact in float32: 2 of the 12 shapes lose
+        # their centre to 1-ULP round-off, so the count came back 10 at every
+        # level. The candidate selector then strode a period-12 array in steps
+        # of 10 and silently selected windows straddling two grid cells.
+        self.num_shapes = len(aspect_ratios) * len(scales)
 
     @torch.no_grad()
     def forward(self, features, img_shape):
@@ -929,13 +952,84 @@ class HardTargetFocalLikeLoss(nn.Module):
 VariFocalLoss = HardTargetFocalLikeLoss
 
 
-class WeedDetLoss(nn.Module):
-    """Combined loss: SmoothL1 + CIoU (regression) + VariFocal (classification)."""
-    def __init__(self, num_classes=1, iou_threshold=0.5, neg_iou_threshold=0.4,
-                 use_atss=True, atss_topk=9, vfl_use_pred_iou=False):
+class ReferenceVarifocalLoss(nn.Module):
+    """IoU-weighted VarifocalNet objective, summed before positive-count normalization.
+
+    Positive weight is q, without the legacy |q-p| modulation. See the authors'
+    implementation: github.com/hyz-xmaster/VarifocalNet, varifocal_loss.py.
+    Targets are detached predicted IoUs when cls_target_mode='pred_iou'.
+    """
+    def __init__(self, alpha=0.75, gamma=2.0):
         super().__init__()
-        self.vfl_use_pred_iou  = vfl_use_pred_iou   # False => anchor-GT IoU target (bootstraps)
-        self.cls_hard_target   = True   # v7 FIX: positives get target 1.0 (see forward)
+        self.alpha, self.gamma = alpha, gamma
+
+    def forward(self, pred, target, return_split=False):
+        target = target.to(dtype=pred.dtype)
+        pos = target > 0
+        weight = torch.where(pos, target,
+                             self.alpha * (pred.sigmoid() - target).abs().pow(self.gamma))
+        weighted = F.binary_cross_entropy_with_logits(pred, target, reduction='none') * weight
+        total = weighted.sum()
+        if not return_split:
+            return total
+        pos_sum = weighted[pos].sum().detach()
+        return total, pos_sum, total.detach() - pos_sum
+
+
+class WeedDetLoss(nn.Module):
+    """SmoothL1 + CIoU regression and an explicitly selected classification loss."""
+    CLS_TARGET_MODES = ("hard", "anchor_iou", "pred_iou")
+    CLS_LOSS_MODES = ('legacy', 'varifocal')
+    #: How ATSS builds its candidate pool. See `_assign_atss` for the measured
+    #: comparison; `cells_best_shape` is the default and `legacy` reproduces the
+    #: pre-2026-08-28 behaviour for ablation.
+    ATSS_CANDIDATE_MODES = ("cells_best_shape", "priors", "priors_iou_tiebreak",
+                            "legacy")
+
+    def __init__(self, num_classes=1, iou_threshold=0.5, neg_iou_threshold=0.4,
+                 use_atss=True, atss_topk=9, vfl_use_pred_iou=False,
+                 cls_target_mode=None, atss_candidate_mode="cells_best_shape",
+                 num_shapes_per_location=12, cls_loss_mode='legacy'):
+        super().__init__()
+        # What a POSITIVE anchor is trained to predict. This decides whether the
+        # classification score carries localisation quality, which decides
+        # whether NMS and COCO AP rank boxes usefully.
+        #
+        #   'hard'       target 1.0 regardless of box quality. The score is a
+        #                presence estimate only. Measured consequence on the
+        #                60-epoch phase-2 run: AP75/AP50 = 0.034 against 0.104
+        #                for a stock Faster R-CNN on the same split, and ~100
+        #                detections per image against the baseline's 55.
+        #   'anchor_iou' target = anchor-to-GT assignment IoU. Quality-aware and
+        #                available from step 1, so it does not depend on the
+        #                predictions being any good yet.
+        #   'pred_iou'   target = IoU(predicted box, matched GT). This is
+        #                VarifocalNet's IACS (arXiv:2008.13367), built on the
+        #                FCOS+ATSS family this model belongs to.
+        #
+        # HISTORY, and why the old measurements do not settle it: the notes
+        # below record 'pred_iou' cold-starving (AP50 0.008) and 'anchor_iou'
+        # capping confidence (AP50 0.037 on overfit-16). Both were measured
+        # under grad_clip 0.5, which is now known to have clipped 100% of steps
+        # and held even the 'hard' configuration at AP50 0.0064. Those runs are
+        # confounded and the comparison deserves a rerun at grad_clip 100.
+        #
+        # INTERACTION: `atss_all_neg` was set True because under hard 1.0
+        # targets, unsupervised anchors saturated to 1.00 and flooded false
+        # positives. Soft targets change that dynamic. Do not flip both at once
+        # -- vary this alone, against a locked assigner and evaluator.
+        if cls_target_mode is None:
+            cls_target_mode = "pred_iou" if vfl_use_pred_iou else "hard"
+        if cls_target_mode not in self.CLS_TARGET_MODES:
+            raise ValueError(
+                f"cls_target_mode={cls_target_mode!r} is not one of "
+                f"{self.CLS_TARGET_MODES}. An unrecognised mode would silently "
+                "fall through to a different training objective.")
+        self.cls_target_mode   = cls_target_mode
+        # Kept as derived attributes so existing readers and checkpoints that
+        # inspect them keep working.
+        self.vfl_use_pred_iou  = cls_target_mode == "pred_iou"
+        self.cls_hard_target   = cls_target_mode == "hard"
         self.atss_all_neg      = True   # T1 FIX (2026-07-09): no ignore band in ATSS mode.
         # Rationale: ~pos anchors with max_iou>=0.4 previously got ZERO cls gradient
         # ("ignore band"). Standard ATSS has no such band. Under hard 1.0 targets those
@@ -947,8 +1041,19 @@ class WeedDetLoss(nn.Module):
         self.neg_iou_threshold = neg_iou_threshold
         self.use_atss          = use_atss
         self.atss_topk         = atss_topk
+        if atss_candidate_mode not in self.ATSS_CANDIDATE_MODES:
+            raise ValueError(
+                f"atss_candidate_mode={atss_candidate_mode!r} is not one of "
+                f"{self.ATSS_CANDIDATE_MODES}. An unrecognised mode would "
+                "silently change which anchors are trained as positives.")
+        self.atss_candidate_mode     = atss_candidate_mode
+        self.num_shapes_per_location = num_shapes_per_location
         self.ciou_loss         = CIoULoss()
-        self.varifocal         = VariFocalLoss()
+        if cls_loss_mode not in self.CLS_LOSS_MODES:
+            raise ValueError(f'cls_loss_mode={cls_loss_mode!r} must be legacy or varifocal')
+        self.cls_loss_mode = cls_loss_mode
+        self.varifocal = (HardTargetFocalLikeLoss() if cls_loss_mode == 'legacy'
+                          else ReferenceVarifocalLoss())
 
     def encode(self, anchors, gt_boxes):
         aw = anchors[:, 2] - anchors[:, 0]
@@ -1021,27 +1126,68 @@ class WeedDetLoss(nn.Module):
         gt_centers = (gt_boxes[:, :2] + gt_boxes[:, 2:]) * 0.5
         distances = ((centers[:, None, :] - gt_centers[None, :, :]) ** 2).sum(dim=2)
 
-        # AUDIT FIX (P1-2): select top-k distinct CELLS per level, then take every
-        # anchor shape at those cells. All co-located shapes share one centre, so
-        # the old per-anchor top-k could return k shapes at a single cell instead
-        # of k nearby spatial locations, destroying the neighbourhood ATSS needs
-        # to compute its mean+std IoU threshold.
+        # ATSS candidate selection. See ATSS_CANDIDATE_MODES.
+        #
+        # Measured 2026-08-28 on 2034 real GT boxes from the phase-2 rebuild
+        # train split, letterboxed to 512 exactly as training does:
+        #
+        #   mode                     pos/GT  mean IoU  >=0.75  >=0.5
+        #   legacy (was the default)  45.71    0.5006  0.0127  0.4211
+        #   priors (literal mmdet)     4.92    0.5990  0.0799  0.8469
+        #   cells_best_shape           4.58    0.6376  0.1096  0.9754
+        #   priors_iou_tiebreak        4.92    0.6244  0.1006  0.9288
+        #   best anchor available         -    0.7346  0.4258  0.9946
+        #
+        # The decisive column is the last one: `legacy` trained 58% of its
+        # positives at IoU < 0.5, i.e. below the threshold AP50 itself uses.
+        #
+        # Why not literal mmdet ATSS: it takes top-k PRIORS by centre distance,
+        # which assumes one prior per location. This model has 12 co-located
+        # shapes sharing a centre, so top-k is decided by tie-breaking on index
+        # order rather than by geometry. `cells_best_shape` restores both the
+        # spatial neighbourhood ATSS needs for its mean+std statistic AND the
+        # one-candidate-per-location semantics the algorithm was derived under.
+        n_shapes = max(int(self.num_shapes_per_location), 1)
         candidate_idxs = []
         start = 0
         for n_level in num_anchors_per_level:
             end = start + n_level
             if end <= start:
                 continue
-            lvl_centers = centers[start:end]
-            # Anchors sharing the first centre = shapes per cell (grid centres are unique).
-            per_cell = int((lvl_centers == lvl_centers[0]).all(dim=1).sum().item()) or 1
-            n_cells = max(n_level // per_cell, 1)
-            cell_dist = distances[start:end:per_cell][:n_cells]      # [n_cells, num_gt]
-            k = min(self.atss_topk, n_cells)
-            _, topk_cells = cell_dist.topk(k, dim=0, largest=False)  # [k, num_gt]
-            cell_base = start + topk_cells * per_cell                # [k, num_gt]
-            offsets = torch.arange(per_cell, device=device).view(per_cell, 1, 1)
-            idxs = (cell_base.unsqueeze(0) + offsets).reshape(k * per_cell, num_gt)
+            if self.atss_candidate_mode == 'legacy':
+                lvl_centers = centers[start:end]
+                per_cell = int((lvl_centers == lvl_centers[0]).all(dim=1).sum().item()) or 1
+                n_cells = max(n_level // per_cell, 1)
+                cell_dist = distances[start:end:per_cell][:n_cells]
+                k = min(self.atss_topk, n_cells)
+                _, topk_cells = cell_dist.topk(k, dim=0, largest=False)
+                cell_base = start + topk_cells * per_cell
+                offsets = torch.arange(per_cell, device=device).view(per_cell, 1, 1)
+                idxs = (cell_base.unsqueeze(0) + offsets).reshape(k * per_cell, num_gt)
+            elif self.atss_candidate_mode == 'cells_best_shape':
+                n_cells = max(n_level // n_shapes, 1)
+                # One representative centre per cell. Strided indexing, not a
+                # float comparison: index == cell * n_shapes + shape.
+                cell_dist = distances[start:end:n_shapes][:n_cells]   # [n_cells, num_gt]
+                k = min(self.atss_topk, n_cells)
+                _, topk_cells = cell_dist.topk(k, dim=0, largest=False)
+                cell_base = start + topk_cells * n_shapes             # [k, num_gt]
+                offsets = torch.arange(n_shapes, device=device).view(n_shapes, 1, 1)
+                all_shapes = cell_base.unsqueeze(0) + offsets         # [n_shapes, k, num_gt]
+                gt_ar = torch.arange(num_gt, device=device)
+                shape_iou = ious[all_shapes.reshape(-1, num_gt), gt_ar]
+                shape_iou = shape_iou.reshape(n_shapes, k, num_gt)
+                best_shape = shape_iou.argmax(dim=0)                  # [k, num_gt]
+                idxs = torch.gather(all_shapes, 0, best_shape.unsqueeze(0)).squeeze(0)
+            else:
+                k = min(self.atss_topk, n_level)
+                key = distances[start:end]
+                if self.atss_candidate_mode == 'priors_iou_tiebreak':
+                    # Co-located shapes tie exactly on distance; nudge by IoU so
+                    # the better-shaped anchor wins the tie instead of index order.
+                    key = key - ious[start:end] * 1e-6
+                _, idxs = key.topk(k, dim=0, largest=False)
+                idxs = start + idxs
             candidate_idxs.append(idxs)
             start = end
 
@@ -1150,12 +1296,12 @@ class WeedDetLoss(nn.Module):
                 # the boxes themselves at median IoU 0.69. Hard 1.0 restored
                 # confidence (overfit-16 AP@50 0.6+). Old quality target kept
                 # behind cls_hard_target=False for ablation.
-                if self.vfl_use_pred_iou:
+                if self.cls_target_mode == 'pred_iou':
                     with torch.no_grad():
                         target_q = elementwise_box_iou(pred_boxes, matched_gt).clamp_(0.0, 1.0)
-                elif self.cls_hard_target:
+                elif self.cls_target_mode == 'hard':
                     target_q = torch.ones(len(pos_idx), device=anchors.device)
-                else:
+                else:  # 'anchor_iou'
                     target_q = quality_iou[pos_idx].clamp(0.0, 1.0)
                 iacs[pos_idx, matched_cls] = target_q
 
@@ -1188,20 +1334,29 @@ class WeedDet(nn.Module):
     CLASS_NAMES = ['Rice']
 
     def __init__(self, num_classes=1, anchor_base_scale=3, lsc_k=7, use_atss=True,
-                 vfl_use_pred_iou=False):
+                 vfl_use_pred_iou=False, cls_target_mode=None,
+                 atss_candidate_mode="cells_best_shape", cls_loss_mode='legacy',
+                 head_norm='batch'):
         super().__init__()
         self.num_classes = num_classes
         self.backbone    = DetResNet50()
         self.fpn         = eFPN(512, 1024, 2048, 256)
-        self.head        = ERetinaHead(256, num_classes, 12, lsc_k)
         self.anchor_gen  = AnchorGenerator(
             base_scale=anchor_base_scale,
             aspect_ratios=(0.2, 0.33, 0.5, 1.0),
             scales=(1.0, 2**(1/3), 2**(2/3)),
             strides=(4, 8, 16),
         )
+        # The head must emit one prediction per anchor shape per location, so it
+        # is sized from the generator rather than from a repeated literal.
+        self.head        = ERetinaHead(256, num_classes,
+                                       self.anchor_gen.num_shapes, lsc_k, head_norm=head_norm)
         self.criterion   = WeedDetLoss(num_classes=num_classes, use_atss=use_atss,
-                                       vfl_use_pred_iou=vfl_use_pred_iou)
+                                       vfl_use_pred_iou=vfl_use_pred_iou,
+                                       cls_target_mode=cls_target_mode,
+                                       atss_candidate_mode=atss_candidate_mode,
+                                       num_shapes_per_location=self.anchor_gen.num_shapes,
+                                       cls_loss_mode=cls_loss_mode)
 
     def forward(self, images, targets=None):
         if isinstance(images, (list, tuple)):
@@ -1571,22 +1726,61 @@ def set_seed(seed=42, deterministic=False):
 
 
 class ModelEMA:
-    """Exponential Moving Average wrapper for model weights."""
-    def __init__(self, model, decay=0.999):
+    """Exponential Moving Average wrapper for model weights.
+
+    The EMA weights are what get scored and what get saved, so a cold start is
+    not cosmetic. With a fixed decay of 0.999 and 225 optimiser steps per epoch,
+    ``0.999 ** 225 = 0.798``: the epoch-1 average is 80% random initialisation,
+    and the epoch-2 checkpoint draw scores weights that are still 64% init. That
+    is visible in the retained 2026-07-30 run, whose ``val_ema/cls_loss`` at
+    epoch 1 is 4.513 against an analytically untrained value of 4.5135.
+
+    ``ramp=True`` applies the standard warmup used by the YOLOv5/timm family:
+    the effective decay starts near 0 and rises to ``decay``, so early averages
+    track the live weights instead of the initialisation. ``ramp_tau`` sets how
+    fast; the default reaches ~0.9 of ``decay`` after roughly 2*tau updates.
+
+    Set ``ramp=False`` to reproduce the pre-2026-08-28 behaviour for ablation.
+    """
+    def __init__(self, model, decay=0.999, ramp=True, ramp_tau=2000.0):
         import copy
         self.ema = copy.deepcopy(model).eval()
         self.decay = decay
+        self.ramp = ramp
+        self.ramp_tau = float(ramp_tau)
+        self.updates = 0
         for p in self.ema.parameters():
             p.requires_grad_(False)
 
+    def current_decay(self):
+        """Effective decay for the next update. Constant when ``ramp`` is off."""
+        if not self.ramp:
+            return self.decay
+        return self.decay * (1.0 - math.exp(-self.updates / self.ramp_tau))
+
     @torch.no_grad()
     def update(self, model):
+        self.updates += 1
+        d = self.current_decay()
         msd = model.state_dict()
         for k, v in self.ema.state_dict().items():
             if v.dtype.is_floating_point:
-                v.copy_(v * self.decay + msd[k].detach() * (1.0 - self.decay))
+                v.copy_(v * d + msd[k].detach() * (1.0 - d))
             else:
                 v.copy_(msd[k])
+
+    def state_dict(self):
+        return {"decay": self.decay, "ramp": self.ramp,
+                "ramp_tau": self.ramp_tau, "updates": self.updates}
+
+    def load_state_dict(self, state):
+        """Restore the ramp counter so a resumed run does not re-warm the EMA."""
+        if not state:
+            return
+        self.decay    = state.get("decay", self.decay)
+        self.ramp     = state.get("ramp", self.ramp)
+        self.ramp_tau = state.get("ramp_tau", self.ramp_tau)
+        self.updates  = int(state.get("updates", 0))
 
 class WarmupMultiStepLR:
     def __init__(self, optimizer, warmup_iters=500, warmup_factor=0.001):
@@ -1770,10 +1964,30 @@ def _restore_training_state(ckpt_path, *, model, ema, optimizer, lr_scheduler, w
     model.load_state_dict(raw, strict=True)
     if ema is not None:
         ema.ema.load_state_dict(ckpt['state_dict'], strict=True)
+        # Restore the ramp counter too. Without it a resumed run restarts the
+        # EMA warmup and re-averages the restored weights toward the live ones,
+        # which is a different trajectory from an uninterrupted run.
+        if ckpt.get('ema_state') is not None and hasattr(ema, 'load_state_dict'):
+            ema.load_state_dict(ckpt['ema_state'])
 
     optimizer.load_state_dict(ckpt['optimizer'])
     if ckpt.get('scheduler') is not None:
+        # CosineAnnealingLR carries T_max in its state, so a plain load would
+        # overwrite the horizon just computed for THIS run with the one from the
+        # run that wrote the checkpoint. That matters because the recursive
+        # cosine form is periodic: past its T_max the LR climbs back up rather
+        # than staying at min_lr. Extending a finished run -- exactly what the
+        # "raise num_epochs to continue training" message tells you to do --
+        # would otherwise restore the old, shorter horizon and send the LR back
+        # toward base_lr.
+        _new_horizon = getattr(lr_scheduler, 'T_max', None)
         lr_scheduler.load_state_dict(ckpt['scheduler'])
+        if _new_horizon is not None:
+            _old_horizon = getattr(lr_scheduler, 'T_max', None)
+            lr_scheduler.T_max = _new_horizon
+            if _old_horizon is not None and _old_horizon != _new_horizon:
+                log(f"[resume] cosine horizon T_max {_old_horizon} -> {_new_horizon} "
+                    "(kept this run's schedule; the checkpoint's would be periodic)")
     if ckpt.get('warmup') is not None:
         warmup.load_state_dict(ckpt['warmup'])
     if scaler is not None and ckpt.get('scaler') is not None:
@@ -1784,10 +1998,11 @@ def _restore_training_state(ckpt_path, *, model, ema, optimizer, lr_scheduler, w
     best_value = ckpt.get('best_metric_value')
     best_value = float(best_value) if best_value is not None else None
 
-    # best_epoch is not in the checkpoint payload; a previous status.json has it.
-    best_epoch = 0
+    # Prefer the checkpoint's own selection metadata. The mutable status pointer
+    # may describe a later epoch, or an interrupted attempt with no best yet.
+    best_epoch = int(ckpt.get('best_epoch', 0) or 0)
     status_path = os.path.join(ckpt_dir, 'status.json')
-    if os.path.isfile(status_path):
+    if not best_epoch and os.path.isfile(status_path):
         try:
             with open(status_path, encoding='utf-8') as handle:
                 best_epoch = int(json.load(handle).get('best_epoch', 0) or 0)
@@ -1855,7 +2070,12 @@ def train_with_progress(config):
         anchor_base_scale=config.get('anchor_base_scale', 3),
         lsc_k=config.get('lsc_k', 7),
         use_atss=config.get('use_atss', True),
+        cls_target_mode=config.get('cls_target_mode', 'hard'),
+        cls_loss_mode=config.get('cls_loss_mode', 'legacy'),
+        head_norm=config.get('head_norm', 'batch'),
+        atss_candidate_mode=config.get('atss_candidate_mode', 'cells_best_shape'),
     ).to(device)
+    print(f"cls target mode: {model.criterion.cls_target_mode}")
 
     # v6 (F1/F2): pretrained backbone, then BN policy — BEFORE optimizer
     # creation so requires_grad filtering sees the final flags.
@@ -2058,7 +2278,31 @@ def train_with_progress(config):
     show_bars = TQDM_AVAILABLE and not config.get('no_progress', False)
 
     def _log(message):
-        """Epoch summaries must not interleave with the bar's stderr writes."""
+        """Epoch summaries must not interleave with the bar's stderr writes.
+
+        The message is coerced to the stream's own encoding first. A Windows
+        console is cp1252, and one un-encodable character raises
+        UnicodeEncodeError from inside ``print``/``tqdm.write`` — which happens
+        *after* the checkpoint is written, so a run dies over a decoration with
+        its weights already safely on disk. Degrading the character is always
+        preferable to losing the run.
+        """
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            message.encode(encoding)
+        except UnicodeEncodeError:
+            # backslashreplace, not replace: these lines carry checkpoint paths,
+            # and collapsing a character to "?" silently corrupts a path the
+            # operator is being told to go and look at. "★" stays readable
+            # and stays recoverable.
+            message = message.encode(encoding, errors="backslashreplace").decode(
+                encoding, errors="replace"
+            )
+        except LookupError:
+            # The stream names a codec this interpreter does not have. Retrying
+            # with that same name would raise again, so ASCII is the only safe
+            # target here.
+            message = message.encode("ascii", errors="backslashreplace").decode("ascii")
         if show_bars:
             tqdm.write(message)
         else:
@@ -2108,6 +2352,21 @@ def train_with_progress(config):
                     f"num_epochs={num_epochs}. Raise num_epochs to continue training, or "
                     "point --checkpoint-dir at a fresh directory to start over.")
             completed_epochs = start_epoch - 1
+
+    from agrinav.training.run_manifest import atomic_json, finish_run, start_run
+    from agrinav.inference.postprocess import DEFAULT_PRE_NMS_TOPK
+    eval_protocol = {
+        'img_size': config.get('img_size', 512),
+        'score_threshold': config.get('val_score_threshold', DEFAULT_SCORE_THRESHOLD),
+        'nms_iou': config.get('val_nms_iou', DEFAULT_NMS_IOU),
+        'max_detections': config.get('val_max_detections', DEFAULT_MAX_DETECTIONS),
+        'use_soft_nms': config.get('val_use_soft_nms', True),
+        'pre_nms_topk': config.get('val_pre_nms_topk', DEFAULT_PRE_NMS_TOPK),
+    }
+    provenance = start_run(
+        config, ckpt_dir, trainer='weeddet', train_dataset=train_ds,
+        val_dataset=val_ds, protocol=eval_protocol, device=str(device),
+        resume_from=resume_from, start_epoch=start_epoch)
 
     epoch_range = range(start_epoch, num_epochs + 1)
     epoch_bar = (tqdm(epoch_range, desc='Epochs', mininterval=bar_interval)
@@ -2281,8 +2540,7 @@ def train_with_progress(config):
             scored = ema.ema if ema is not None else model
             ap_result, _dets, ap_protocol = evaluate_split(
                 scored, val_ds, val_ap_ann_file, device=str(device),
-                img_size=config.get('img_size', 512),
-                batch_size=val_batch_size)
+                batch_size=val_batch_size, **eval_protocol)
             val_ap = {
                 'val/AP': ap_result.ap, 'val/AP50': ap_result.ap50,
                 'val/AP75': ap_result.ap75, 'val/AP_small': ap_result.ap_small,
@@ -2303,6 +2561,8 @@ def train_with_progress(config):
             epoch_metric = avg_loss
 
         row = {'epoch': epoch, 'num_epochs': num_epochs,
+               'run_id': provenance['run_id'],
+               'eval_protocol': eval_protocol if 'val/AP' in val_metrics else None,
                'train/total_loss': avg_loss, 'n_batches': n_batches,
                'skipped_batches': skipped_batches,
                'clipped_steps': clipped_steps, 'amp_skipped_steps': amp_skipped_steps,
@@ -2341,9 +2601,14 @@ def train_with_progress(config):
                     'loss': loss_value,
                     'best_metric_name': select_metric,
                     'best_metric_value': best_loss,
+                    'best_epoch': best_epoch,
                     'class_names': list(config.get('class_names', [])),
                     'num_classes': config.get('num_classes'),
                     'config': saved_config,
+                    'provenance': provenance,
+                    'ema_state': (ema.state_dict()
+                                  if ema is not None and hasattr(ema, 'state_dict')
+                                  else None),
                     'scaler': scaler.state_dict() if use_amp else None}
 
         # Always write a terminal artifact. Previously the only per-epoch files
@@ -2356,7 +2621,7 @@ def train_with_progress(config):
         if is_best:
             path = os.path.join(ckpt_dir, 'weeddet_best.pth')
             atomic_torch_save(_payload(best_loss), path)
-            _log(f"  ★ Best checkpoint ({select_metric}={best_loss:.4f}) -> {path}")
+            _log(f"  * Best checkpoint ({select_metric}={best_loss:.4f}) -> {path}")
 
         if epoch % save_every == 0:
             path = os.path.join(ckpt_dir, f'weeddet_epoch{epoch}.pth')
@@ -2364,6 +2629,10 @@ def train_with_progress(config):
             _log(f"  Checkpoint saved  -> {path}")
 
         completed_epochs = epoch
+        atomic_json(os.path.join(ckpt_dir, 'status.json'), {
+            'completed': False, 'epochs_planned': num_epochs,
+            'epochs_completed': completed_epochs, 'best_epoch': best_epoch,
+            'provenance': provenance})
 
     status = {
         'completed': completed_epochs == num_epochs,
@@ -2377,10 +2646,10 @@ def train_with_progress(config):
         'amp_skipped_steps': amp_skipped_steps,
         'global_step': global_step,
         'checkpoint_dir': os.path.abspath(ckpt_dir),
+        'provenance': provenance,
     }
     status_path = os.path.join(ckpt_dir, 'status.json')
-    with open(status_path, 'w', encoding='utf-8') as handle:
-        json.dump(status, handle, indent=2, sort_keys=True)
+    finish_run(ckpt_dir, status, ['weeddet_last.pth', 'weeddet_best.pth'])
     _log(f"\nTraining complete. best_epoch={best_epoch} "
          f"({select_metric}={best_loss:.4f}) -> {status_path}")
     return model

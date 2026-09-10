@@ -20,6 +20,7 @@ from agrinav.data.build_rice_phase2 import (
     BuildError,
     build,
     derive_group_id,
+    main,
     normalize_image_bytes,
     package,
     preflight,
@@ -510,3 +511,150 @@ def test_package_can_include_the_test_split(source_tree, tmp_path):
     package(str(out), str(tmp_path / "full.zip"), include_test=True)
     with zipfile.ZipFile(tmp_path / "full.zip") as archive:
         assert any(name.startswith("images/test/") for name in archive.namelist())
+
+
+# --------------------------------------------------------------------------- #
+# Preflight report destination
+#
+# Verifying a dataset must be able to leave it byte-identical: a read-only or
+# checksum-pinned tree cannot absorb a write, and "verify" that mutates is not
+# a verification. The default is kept exactly as it was.
+# --------------------------------------------------------------------------- #
+def _tree_state(root):
+    """Every file under ``root`` mapped to its bytes. Detects any write at all."""
+    state = {}
+    for directory, _, names in os.walk(root):
+        for name in names:
+            path = os.path.join(directory, name)
+            with open(path, "rb") as handle:
+                state[os.path.relpath(path, root)] = handle.read()
+    return state
+
+
+def test_preflight_still_writes_into_the_dataset_by_default(source_tree, tmp_path):
+    out = tmp_path / "out"
+    build(source_tree["root"], str(out), split_manifest=source_tree["manifest"])
+    default_report = out / "reports" / "preflight.json"
+    assert not default_report.exists()
+    report = preflight(str(out), split_manifest=source_tree["manifest"])
+    assert default_report.is_file()
+    assert json.loads(default_report.read_text()) == report
+
+
+def test_report_path_writes_exactly_there_and_never_into_the_dataset(source_tree, tmp_path):
+    out = tmp_path / "out"
+    build(source_tree["root"], str(out), split_manifest=source_tree["manifest"])
+    before = _tree_state(out)
+    external = tmp_path / "elsewhere" / "preflight.json"
+    report = preflight(str(out), split_manifest=source_tree["manifest"], report_path=str(external))
+    assert external.is_file()
+    assert json.loads(external.read_text()) == report
+    assert not (out / "reports" / "preflight.json").exists()
+    assert _tree_state(out) == before
+
+
+def test_no_report_leaves_the_dataset_byte_identical(source_tree, tmp_path):
+    out = tmp_path / "out"
+    build(source_tree["root"], str(out), split_manifest=source_tree["manifest"])
+    before = _tree_state(out)
+    report = preflight(str(out), split_manifest=source_tree["manifest"], no_report=True)
+    assert report["passed"] is True
+    assert _tree_state(out) == before
+
+
+def test_combining_the_two_options_is_refused_before_any_work(source_tree, tmp_path):
+    out = tmp_path / "out"
+    build(source_tree["root"], str(out), split_manifest=source_tree["manifest"])
+    before = _tree_state(out)
+    with pytest.raises(BuildError) as excinfo:
+        preflight(str(out), no_report=True, report_path=str(tmp_path / "r.json"))
+    message = str(excinfo.value)
+    assert "mutually exclusive" in message
+    assert "--report-path" in message and "--no-report" in message
+    assert not (tmp_path / "r.json").exists()
+    assert _tree_state(out) == before
+
+
+def _tamper(out):
+    """Replace one image with a valid but different JPEG, so preflight fails.
+
+    Uses the same defect as ``test_preflight_catches_a_tampered_image``
+    (hash_mismatch); a non-image file raises out of PIL before preflight can
+    collect a failure, which would test the wrong thing.
+    """
+    target = out / "images" / "train" / "frame_000000_jpg.rf.aaaa.jpg"
+    target.write_bytes(_jpeg(32, 24, colour=(200, 10, 10)))
+
+
+def test_failure_message_names_the_default_report_path(source_tree, tmp_path):
+    out = tmp_path / "out"
+    build(source_tree["root"], str(out), split_manifest=source_tree["manifest"])
+    _tamper(out)
+    with pytest.raises(BuildError) as excinfo:
+        preflight(str(out), split_manifest=source_tree["manifest"])
+    written = out / "reports" / "preflight.json"
+    assert str(written) in str(excinfo.value)
+    assert written.is_file()
+
+
+def test_failure_message_names_the_external_report_path(source_tree, tmp_path):
+    out = tmp_path / "out"
+    build(source_tree["root"], str(out), split_manifest=source_tree["manifest"])
+    _tamper(out)
+    external = tmp_path / "elsewhere" / "preflight.json"
+    with pytest.raises(BuildError) as excinfo:
+        preflight(str(out), split_manifest=source_tree["manifest"], report_path=str(external))
+    assert str(external) in str(excinfo.value)
+    assert external.is_file()
+    assert not (out / "reports" / "preflight.json").exists()
+
+
+def test_failure_message_says_no_report_was_written(source_tree, tmp_path):
+    out = tmp_path / "out"
+    build(source_tree["root"], str(out), split_manifest=source_tree["manifest"])
+    _tamper(out)
+    with pytest.raises(BuildError) as excinfo:
+        preflight(str(out), split_manifest=source_tree["manifest"], no_report=True)
+    message = str(excinfo.value)
+    assert "no report was written (--no-report)" in message
+    assert "preflight.json" not in message
+    assert not (out / "reports" / "preflight.json").exists()
+
+
+def test_failure_message_does_not_name_a_report_that_was_never_written(source_tree, tmp_path):
+    """The old message named reports/preflight.json even when reports/ was absent."""
+    out = tmp_path / "out"
+    build(source_tree["root"], str(out), split_manifest=source_tree["manifest"])
+    _tamper(out)
+    for name in os.listdir(out / "reports"):
+        os.unlink(out / "reports" / name)
+    os.rmdir(out / "reports")
+    with pytest.raises(BuildError) as excinfo:
+        preflight(str(out), split_manifest=source_tree["manifest"])
+    assert "no report was written" in str(excinfo.value)
+    assert not (out / "reports").exists()
+
+
+def test_preflight_cli_exposes_both_options(source_tree, tmp_path):
+    out = tmp_path / "out"
+    build(source_tree["root"], str(out), split_manifest=source_tree["manifest"])
+    external = tmp_path / "cli" / "preflight.json"
+    assert main(["preflight", "--out-root", str(out), "--report-path", str(external)]) == 0
+    assert external.is_file()
+    assert not (out / "reports" / "preflight.json").exists()
+    before = _tree_state(out)
+    assert main(["preflight", "--out-root", str(out), "--no-report"]) == 0
+    assert _tree_state(out) == before
+    assert (
+        main(
+            [
+                "preflight",
+                "--out-root",
+                str(out),
+                "--no-report",
+                "--report-path",
+                str(external),
+            ]
+        )
+        == 1
+    )
