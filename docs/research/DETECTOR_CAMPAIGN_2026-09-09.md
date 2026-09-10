@@ -54,7 +54,9 @@ not proof of novelty, field readiness, or likely publication acceptance.
 - [x] Commit reviewed infrastructure as `979627a` on the active branch; reconcile
   all four local paper provenance files to that development source, preserving
   the original snapshot revision and each historical result's own source.
-  Paper changes remain uncommitted; draft PR preparation is recorded in handoff.
+  Paper changes remain uncommitted. The active branch is pushed in
+  [draft PR #6](https://github.com/Bmerrysmith/Autonomous-tractor-system/pull/6);
+  no merge has occurred. Source freeze still requires final launch checks.
 - [x] Correct factual/scope claims in all four existing paper READMEs locally;
   preserve original bytes. The later pin update records development source, not
   a retrospective claim that earlier experiments used that committed revision.

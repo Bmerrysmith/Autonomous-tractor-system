@@ -52,8 +52,10 @@ review-export validator passes twelve synthetic checks and verifies sample/image
 judgments. Finish runtime/source locks before screening; current decisions live in GATE_STATUS.md.
 
 Preserve the user's existing edits to `docs/baselines.md` and untracked Claude
-skills. Reviewed infrastructure source is commit `979627a`; research documentation
-is prepared for a separate commit and draft PR on the active branch. All four
+skills. Reviewed infrastructure source is commit `979627a`; campaign documentation
+is committed as `0052264`. Both are pushed in
+[draft PR #6](https://github.com/Bmerrysmith/Autonomous-tractor-system/pull/6),
+awaiting GitHub checks and upstream review. All four
 paper READMEs and PROVENANCE.md files have local corrections and this infrastructure
 pin, keeping the original snapshot and historical result provenance explicit.
 Paper-repository changes remain uncommitted. Navigation stays separate.
