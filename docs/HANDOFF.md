@@ -17,7 +17,48 @@ It is intentionally short: a *pointer*, not a log. Detailed history lives in git
 
 ---
 
-## Current status — 2026-09-01
+## Current status — 2026-09-09
+
+Executing the detector-first publication campaign:
+[plan and progress](research/DETECTOR_CAMPAIGN_2026-09-09.md), with current verdicts
+in [GATE_STATUS.md](GATE_STATUS.md). GitHub audit is outside the checkout at
+`../GITHUB_REVIEW_2026-09-09.md` relative to the repository root.
+
+Done: both trainers record immutable launch evidence and checkpoint/metric hashes;
+research aggregation rejects incompatible or incomplete runs; standalone loading
+now honors anchor scale and head configuration; separate Varifocal and head
+GroupNorm options preserve legacy defaults. Full CPU suite passed 689 tests and
+16 subtests; subsequent focused runs passed 64 and 80 tests. No campaign validation
+results have been produced by this work yet.
+
+Diagnostics: nine resource pilots fit GPU memory. The historical sixteen-image
+gate has rice annotations only. Its incumbent failure is localized to head BN
+running statistics. On a separate both-class subset, Varifocal passes and head
+GroupNorm misses recall. Saved checkpoint metrics and artifact hashes are verified.
+Default model behavior matches pre-campaign HEAD in bounded CPU checks. Evidence,
+limitations, and budget are in the [diagnostics report](../reports/summaries/detector_diagnostics_2026-09-09.md).
+Full training epochs take 95.00 s (WeedDet 512/b8), 99.15 s (512/b4),
+142.97 s (640/b4), and 91.38 / 106.65 s (Faster R-CNN 512/640, b4).
+46.02 diagnostic minutes used. The [analysis protocol](research/DETECTOR_ANALYSIS_PROTOCOL_2026-09-09.md)
+and [IEEE preparation note](research/IEEE_PREPARATION_2026-09-09.md) are ready for review.
+
+Data: no-write preflight passed. All 24 re-derived cross-split groups remain
+unresolved capture provenance; three also merge filename forms. No cross-split
+byte or decoded-pixel duplicates found. A balanced 100-object human review is
+prepared outside Git at `../audit_artifacts/detector_campaign_2026-09-09/object_review.html`.
+Version 2 preserves the same objects and adds full-image missed-label review,
+with all existing boxes visible. Review judgments are still pending. The
+review-export validator passes twelve synthetic checks and verifies sample/image identities; it has generated no human
+judgments. Finish runtime/source locks before screening; current decisions live in GATE_STATUS.md.
+
+Preserve the user's existing edits to `docs/baselines.md` and untracked Claude
+skills. Reviewed infrastructure source is commit `979627a`; research documentation
+is prepared for a separate commit and draft PR on the active branch. All four
+paper READMEs and PROVENANCE.md files have local corrections and this infrastructure
+pin, keeping the original snapshot and historical result provenance explicit.
+Paper-repository changes remain uncommitted. Navigation stays separate.
+
+## Previous status — 2026-09-01
 
 **Environment changed: the GPU is usable.** `torch 2.13.0+cu130` /
 `torchvision 0.28.0+cu130`, `cuda_available True`, RTX 4070 12 GB, driver 595.71.

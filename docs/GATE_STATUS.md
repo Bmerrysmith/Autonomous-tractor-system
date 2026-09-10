@@ -1,6 +1,7 @@
 # Gate status — the one authoritative answer to "can I run this?"
 
-**Last updated: 2026-07-31.**
+**Last updated: 2026-09-09.** The current campaign table below supersedes the
+historical July/August verdicts retained later in this file.
 
 This file exists because three documents used to answer the same question three
 different ways: `START_HERE.md` said "do not train the detector yet",
@@ -14,7 +15,35 @@ narrative session log; this is the standing verdict.
 
 ---
 
-## Right now
+## Current campaign — 2026-09-09
+
+| Activity | Verdict | Evidence or remaining gate |
+|---|---|---|
+| CPU verification | **PASS** | 689 tests and 16 subtests; subsequent focused runs: 64 and 80 passed. Ruff and Black pass. Default-model state, loss, gradients, one update, and evaluation outputs match HEAD exactly in the bounded CPU check. |
+| Rebuilt-data structural preflight | **PASS** | Rechecked without writing the dataset: 2,579 images / 81,201 boxes. |
+| Dataset independence claim | **UNRESOLVED** | 24 re-derived groups cross partitions; three merge filename forms. No exact byte/pixel duplicates across splits, but capture-session provenance is missing. Treat this as historical development data. |
+| Resource and throughput pilots | **PASS, LIMITED** | Nine configurations completed without OOM. Full training epochs: WeedDet 512/b8 95.00 s, 512/b4 99.15 s, 640/b4 142.97 s; Faster R-CNN 512/b4 91.38 s, 640/b4 106.65 s. Approx. 28.14 training hours for comparable 512 confirmation or 34.88 hours for the 640 finalist design. Validation/overhead remain unmeasured; confirmation cap stays 40 hours. |
+| Historical sixteen-image memorization gate | **MIXED; RICE ONLY** | Incumbent fails (AP50 0.3478 / AR100 0.1782); reference Varifocal passes (0.9753 / 0.7643); head GroupNorm passes (0.9780 / 0.6778). All 409 GT annotations are rice. Same seed/subset and unchanged thresholds; no both-class claim. |
+| Incumbent normalization diagnosis | **DEFECT LOCALIZED** | Current checkpoint reaches AP50 0.99084 / AR100 0.77139 when only head BN uses batch statistics. Earlier model shows the same failure pattern. Batch-statistics evaluation is diagnostic only; incumbent's original failed gate remains failed. |
+| Both-class memorization diagnostic | **VARIFOCAL PASS; GROUPNORM FAIL** | Sixteen images / 407 rice / 105 weed annotations. Varifocal AP50 0.84854 / AR100 0.53329 passes unchanged thresholds; GroupNorm 0.69358 / 0.44957 misses recall. Checkpoints and reconstructed metrics verified. |
+| Bounded diagnostics | **GO; CURRENT CHECKS FINISHED** | Local RTX 4070; 46.02 minutes charged to the 5-hour allocation, including failures. Preserve failed evidence and the original acceptance thresholds. No GPU job is running. |
+| Seven-arm screening | **PENDING HUMAN REVIEW, SOURCE FREEZE, AND RUNTIME FIT** | 100-object version-2 packet remains unreviewed: class, box/merged plants, and full-image missed labels. Seven configurations are prepared, not launched. Incumbent failure is diagnosed and remains explicit as a research control; the strong reference stays required. A smoke-test pass does not select a finalist. |
+| Historical standalone AP for anchor-4 checkpoints | **RE-EVALUATE BEFORE COMPARISON** | Loader previously reconstructed anchor scale 3. In-training AP uses the live model and is not invalidated by that defect alone. |
+| Headline detector or generalization claim | **NO-GO** | Baselines now exist; the old “no baseline has been run” blocker is stale. Matched confirmation, uncertainty, and external validity remain unresolved. |
+| Final test evaluation | **DEFER UNTIL SELECTION IS FROZEN** | No test-based tuning; historical contamination remains specific to the affected weights. |
+| IEEE manuscript package | **PREPARE STRUCTURE; RESULTS PENDING** | Use the existing four paper repositories after a bounded detector study. No venue selected. |
+| New data/package release | **RIGHTS CHECK PENDING** | The main GitHub repository is already public; project and source-data licensing still need resolution. |
+| Actuation or spray deployment | **NO-GO** | Perception research scope only. |
+
+Campaign details and decision rules:
+[detector campaign](research/DETECTOR_CAMPAIGN_2026-09-09.md).
+The 60 GPU-hour cap includes failed runs: 15 screening, 40 confirmation, 5 diagnostics.
+The [analysis protocol](research/DETECTOR_ANALYSIS_PROTOCOL_2026-09-09.md) specifies
+seed-level confidence intervals and inference endpoints. The
+[IEEE preparation note](research/IEEE_PREPARATION_2026-09-09.md) lists simpler tasks,
+outline corrections, and three preliminary venue candidates.
+
+## Historical verdicts — July/August 2026
 
 | Activity | Verdict | Why |
 |---|---|---|
