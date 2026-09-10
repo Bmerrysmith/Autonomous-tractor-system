@@ -58,12 +58,38 @@ def _argv(tmp_path, ann_file, images_root, **extra):
         "2",
         "--device",
         "cpu",
+        "--no-pretrained-backbone",
         "--checkpoint-dir",
         str(tmp_path / "ckpt"),
     ]
     for key, value in extra.items():
         argv += [f"--{key.replace('_', '-')}", str(value)]
     return argv
+
+
+@pytest.fixture
+def controlled_training_loss(monkeypatch):
+    """Gate-logic tests prescribe losses; separate tests run the real training graph.
+
+    A two-step random detector need not improve on every torch/CPU build. Keep
+    the CLI, optimizer, decoding, and verdict path, but control this one input to
+    the gate instead of tuning clipping/epochs until a random trajectory passes.
+    """
+    losses = [2.0, 1.0]
+    original_forward = wt._WD.WeedDet.forward
+
+    def forward(model, images, targets=None):
+        if targets is None:
+            return original_forward(model, images)
+        index = getattr(model, "_gate_test_loss_index", 0)
+        model._gate_test_loss_index = index + 1
+        # A differentiable zero retains backward/optimizer plumbing without
+        # claiming these scripted values measure detector learning.
+        loss = next(model.parameters()).reshape(-1)[0] * 0 + losses[index]
+        return {"total_loss": loss, "cls_loss_pos": loss.detach(), "cls_loss_neg": 0.0}
+
+    monkeypatch.setattr(wt._WD.WeedDet, "forward", forward)
+    return losses
 
 
 # --------------------------------------------------------------------------- #
@@ -103,7 +129,7 @@ def test_subset_gt_keeps_the_source_categories(tmp_path):
 # --------------------------------------------------------------------------- #
 # the gate decides on decoded detections
 # --------------------------------------------------------------------------- #
-def test_two_epochs_fail_the_gate_on_decoded_metrics_not_on_the_loss(tmp_path, capsys):
+def test_two_epochs_fail_the_gate_on_decoded_metrics(tmp_path, capsys):
     """A model that has not memorised anything must fail, and say why.
 
     Two epochs is nowhere near memorisation, so this exercises the real decode
@@ -118,12 +144,14 @@ def test_two_epochs_fail_the_gate_on_decoded_metrics_not_on_the_loss(tmp_path, c
     assert "AP50" in out.split("FAILED")[1]
 
 
-def test_the_gate_passes_when_the_decoded_metrics_are_good(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("losses,expected", [([2.0, 1.0], 0), ([1.0, 1.0], 1), ([1.0, 2.0], 1)])
+def test_good_decoded_metrics_still_require_falling_loss(
+    tmp_path, monkeypatch, capsys, controlled_training_loss, losses, expected
+):
     """Threshold logic in isolation: real memorisation is too slow for CI.
 
-    The model, the decode and the parity probe all still run; only the scoring is
-    substituted, so a change to how the gate combines its conditions is caught
-    here without depending on 60 epochs of CPU training.
+    Controlled loss, decoded metrics, and parity exercise the actual CLI verdict
+    without depending on random-network convergence over two CPU steps.
     """
     monkeypatch.setattr(
         wt, "_subset_coco_gt", lambda dataset: {"images": [], "annotations": [], "categories": []}
@@ -142,16 +170,14 @@ def test_the_gate_passes_when_the_decoded_metrics_are_good(tmp_path, monkeypatch
         },
     )
     ann_file, images_root = _write_synthetic_split(str(tmp_path))
-    # grad_clip pinned for the same reason as test_thresholds_are_configurable,
-    # and with the same caveat: 0.5 is not a recommendation, the default is 100.
-    # This test asserts the gate PASSES, so it needs all four conditions met, and
-    # the loss-drop condition is the one with no flag to monkeypatch. See the
-    # measured table in that test's comment.
-    assert main(_argv(tmp_path, ann_file, images_root, grad_clip=0.5)) == 0
-    assert "PASSED" in capsys.readouterr().out
+    controlled_training_loss[:] = losses
+    assert main(_argv(tmp_path, ann_file, images_root)) == expected
+    assert ("PASSED" if expected == 0 else "loss did not drop") in capsys.readouterr().out
 
 
-def test_a_bn_mode_gap_fails_the_gate_even_with_good_ap(tmp_path, monkeypatch, capsys):
+def test_a_bn_mode_gap_fails_the_gate_even_with_good_ap(
+    tmp_path, monkeypatch, capsys, controlled_training_loss
+):
     """The 2026-07-28 shape exactly: high train-mode confidence, dead in eval mode.
 
     AP is passed as healthy here so the only thing that can fail is the parity
@@ -178,9 +204,10 @@ def test_a_bn_mode_gap_fails_the_gate_even_with_good_ap(tmp_path, monkeypatch, c
     out = capsys.readouterr().out
     assert "confidence ratio" in out
     assert "AP50" not in out.split("FAILED")[1], "AP was healthy; only parity should fail"
+    assert "loss did not drop" not in out.split("FAILED")[1]
 
 
-def test_thresholds_are_configurable(tmp_path, monkeypatch):
+def test_thresholds_are_configurable(tmp_path, monkeypatch, controlled_training_loss):
     """Provisional numbers must be overridable without editing source."""
     monkeypatch.setattr(
         wt, "_subset_coco_gt", lambda dataset: {"images": [], "annotations": [], "categories": []}
@@ -199,23 +226,7 @@ def test_thresholds_are_configurable(tmp_path, monkeypatch):
         },
     )
     ann_file, images_root = _write_synthetic_split(str(tmp_path))
-    # grad_clip is pinned, and 0.5 is NOT a recommendation -- the production
-    # default is 100 (b650fff). It is pinned because the gate's fourth condition,
-    # `final_loss < initial_loss`, is the one gate condition with no flag, so
-    # unlike AP50/AR100/parity this test cannot neutralise it by monkeypatch. On
-    # this 2-epoch 64px fixture the loss-drop outcome is a function of step size:
-    # 5.0077 -> 4.8899 at clip 0.5 and 4.7616 at 5.0, but 5.0077 -> 5.0471 at
-    # both 40 and 100, while cls_pos still falls 4.3802 -> 4.1745. Measured
-    # 2026-09-02. Raising the epoch count does not fix it -- the sign oscillates
-    # (4 drops, 6 rises, 8 drops, 12 rises), so any epoch count that passes is
-    # calibration to a lucky number, not a test.
-    #
-    # This test pins threshold *configurability*. Pinning the step size keeps the
-    # unrelated fourth condition out of the result. It does mean the assertions
-    # below never exercise the production default; the gate's behaviour there is
-    # covered by test_the_gate_reports_the_gradient_norm_distribution.
-    clip = {"grad_clip": 0.5}
-    assert main(_argv(tmp_path, ann_file, images_root, **clip)) == 1
+    assert main(_argv(tmp_path, ann_file, images_root)) == 1
     assert (
         main(
             _argv(
@@ -224,7 +235,6 @@ def test_thresholds_are_configurable(tmp_path, monkeypatch):
                 images_root,
                 overfit_min_ap50=0.10,
                 overfit_min_recall=0.05,
-                **clip,
             )
         )
         == 0

@@ -60,6 +60,15 @@ paper READMEs and PROVENANCE.md files have local corrections and this infrastruc
 pin, keeping the original snapshot and historical result provenance explicit.
 Paper-repository changes remain uncommitted. Navigation stays separate.
 
+GitHub follow-up: two gate-unit tests depended on a random detector's two-step
+loss decrease; CPU fixtures also implicitly selected ImageNet when CUDA was
+available. Their fixtures now use explicit scratch initialization and controlled
+loss trajectories for verdict tests, including flat/rising-loss rejection. Real
+training/decode tests remain; 31 focused checks pass. Production code and gate
+thresholds are unchanged. Qodana separately fails before scanning because its
+cloud server rejects the configured token/license; restore that credential/license
+and rerun. See PR checks for current CI status.
+
 ## Previous status — 2026-09-01
 
 **Environment changed: the GPU is usable.** `torch 2.13.0+cu130` /
