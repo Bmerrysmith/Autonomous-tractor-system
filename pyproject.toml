@@ -69,6 +69,7 @@ line-length = 100
 # July-20 audit references its exact line numbers (e.g. weeddet_v6b.py:1076-1088),
 # so it is reformatted only when that rewrite lands. See docs/adr/0002-packaging-and-ci.md.
 extend-exclude = [
+    ".claude",
     "_archive",
     "notebooks",
     "active",
@@ -96,7 +97,8 @@ target-version = ["py312"]
 # weeddet_v6b.py is held byte-stable pending its Gate-4 rewrite (see [tool.ruff]).
 extend-exclude = '''
 /(
-    _archive
+    \.claude
+  | _archive
   | notebooks
   | active
   | paper

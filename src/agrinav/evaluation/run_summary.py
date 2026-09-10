@@ -1,53 +1,25 @@
 #!/usr/bin/env python3
-"""Summarise training runs from ``metrics.jsonl`` without selecting on the maximum.
+"""Inspect detector runs; aggregate only complete, matched, independently seeded runs.
 
-Why this exists
----------------
-The 2026-09-03 ablation reported each run as ``max(val/AP)`` over its logged
-epochs. That is the **maximum of a noisy sequence**, and it has three properties
-that make it the wrong number to compare arms with:
-
-1. it is biased upward — ``E[max of k] = mu + a_k * sigma`` — so every reported
-   AP was inflated;
-2. the bias grows with an arm's own noise, so a noisier arm wins a maximum
-   contest even when its true curve is identical. In that ablation
-   ``sd(C_no_atss)`` was 2.0x ``sd(A_baseline)``, and the bound on the resulting
-   differential bias (0.0089 AP) exceeded the effect being reported (0.0048);
-3. runs with different ``val_ap_interval`` or epoch counts get different ``k``,
-   so an 8-epoch run (k=4) and an 18-epoch run (k=9) are not even the same
-   estimator.
-
-``terminal_ap`` reports the mean of the last ``k`` evaluations instead: unbiased
-for end-of-schedule quality, averages evaluation noise down by ``sqrt(k)``, and
-comparable across runs whose schedules match.
-
-Checkpoint *selection* by best validation AP is untouched and remains correct —
-you do want the best weights. What changes is the number a run is **scored** by.
-
-This module also reads the metric keys that actually exist. Two typos in the
-ablation drivers (``avg_loss`` for ``train/total_loss``, ``val/AP-small`` for
-``val/AP_small``) silently discarded the loss curves and every small-object AP,
-in an experiment justified by small objects. The keys here are asserted against
-the file rather than assumed.
-
-CLI::
-
-    python -m agrinav.evaluation.run_summary <run-dir> [<run-dir> ...]
-    python -m agrinav.evaluation.run_summary --tail 3 --json out.json runs/*/
+The terminal statistic is a descriptive mean of trailing evaluations, not an
+unbiased estimate or independent replication: neighboring checkpoints correlate.
+The maximum remains separate because checkpoint selection and comparing training
+recipes answer different questions. Legacy metrics.jsonl and baseline run.json
+remain readable; research aggregation requires verified launch manifests.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 from pathlib import Path
 from typing import Any
 
-#: Metrics reported per run. Aggregate AP alone hides the two failure modes this
-#: detector actually has: weed AP runs 3-5x below rice, and AP75 runs ~20x below
-#: AP50, so localisation -- not detection -- dominates the error.
-REPORTED_METRICS: tuple[str, ...] = (
+from agrinav.training.run_manifest import file_sha256, read_manifest
+
+REPORTED_METRICS = (
     "val/AP",
     "val/AP50",
     "val/AP75",
@@ -56,193 +28,289 @@ REPORTED_METRICS: tuple[str, ...] = (
     "val/AP[rice_protect]",
     "val/AP[weed_target]",
 )
-
 DEFAULT_TAIL = 3
 
 
 class RunSummaryError(RuntimeError):
-    """A run directory cannot be summarised."""
+    """A run cannot be inspected or included in a research aggregate."""
 
 
-def load_eval_rows(metrics_path: Path) -> list[dict[str, Any]]:
-    """Rows from ``metrics.jsonl`` that carry a validation AP, in epoch order."""
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _metric(value: Any) -> bool:
+    return _number(value) and 0 <= value <= 1
+
+
+def _json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RunSummaryError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RunSummaryError(f"{path} must contain a JSON object")
+    return value
+
+
+def _load_rows(metrics_path: Path) -> list[dict[str, Any]]:
     if not metrics_path.exists():
         raise RunSummaryError(f"no metrics.jsonl at {metrics_path}")
-    rows: list[dict[str, Any]] = []
+    rows = []
     for line_no, line in enumerate(metrics_path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
         try:
-            rows.append(json.loads(line))
+            row = json.loads(line)
         except json.JSONDecodeError as exc:
             raise RunSummaryError(f"{metrics_path}:{line_no} is not valid JSON: {exc}") from exc
-    evals = [r for r in rows if isinstance(r.get("val/AP"), (int, float))]
+        if not isinstance(row, dict):
+            raise RunSummaryError(f"{metrics_path}:{line_no} must contain a JSON object")
+        rows.append(row)
+    return rows
+
+
+def _eval_rows(rows: list[dict[str, Any]], source: Path) -> list[dict[str, Any]]:
+    previous = 0
+    evals = []
+    for row in rows:
+        epoch = row.get("epoch")
+        if type(epoch) is not int or epoch <= previous:
+            raise RunSummaryError(f"{source}: epochs must be positive, unique and increasing")
+        previous = epoch
+        if "val/AP" not in row:
+            continue
+        if not _metric(row["val/AP"]):
+            raise RunSummaryError(f"{source}: epoch {epoch} has invalid val/AP {row['val/AP']!r}")
+        evals.append(row)
     if not evals:
-        raise RunSummaryError(
-            f"{metrics_path} has {len(rows)} rows but none carry 'val/AP' — "
-            "the run logged no validation evaluation"
-        )
-    return sorted(evals, key=lambda r: r.get("epoch", 0))
+        raise RunSummaryError(f"{source} has {len(rows)} rows but none carry 'val/AP'")
+    return evals
 
 
-def _mean(values: list[float]) -> float | None:
-    return statistics.mean(values) if values else None
+def load_eval_rows(metrics_path: Path) -> list[dict[str, Any]]:
+    return _eval_rows(_load_rows(metrics_path), metrics_path)
+
+
+def _baseline_rows(run: dict[str, Any]) -> list[dict[str, Any]]:
+    epochs = run.get("epochs")
+    if not isinstance(epochs, list) or any(not isinstance(row, dict) for row in epochs):
+        raise RunSummaryError("baseline run.json must contain an epochs array of objects")
+    rows = []
+    for epoch in epochs:
+        row = {
+            "epoch": epoch.get("epoch"),
+            "train/total_loss": epoch.get("train_loss"),
+            "eval_protocol": epoch.get("eval_protocol"),
+            "run_id": (run.get("provenance") or {}).get("run_id"),
+        }
+        if epoch.get("val_ap") is not None:
+            row["val/AP"] = epoch["val_ap"]
+        metrics = epoch.get("eval_metrics", {})
+        if not isinstance(metrics, dict):
+            raise RunSummaryError("baseline eval_metrics must be an object")
+        row.update(metrics)
+        rows.append(row)
+    return rows
 
 
 def summarise_run(run_dir: Path, tail: int = DEFAULT_TAIL) -> dict[str, Any]:
-    """Terminal and (for contrast) maximum statistics for one run directory.
-
-    Args:
-        run_dir: a checkpoint directory containing ``metrics.jsonl``.
-        tail: how many trailing evaluations the terminal statistic averages.
-
-    Returns:
-        A record carrying, per metric in :data:`REPORTED_METRICS`, the terminal
-        mean and the maximum, plus the epochs those came from and any provenance
-        recorded in ``status.json``.
-    """
-    if tail < 1:
+    """Inspect current and legacy runs; expose reasons research aggregation is blocked."""
+    if type(tail) is not int or tail < 1:
         raise RunSummaryError(f"tail must be >= 1, got {tail}")
-
-    evals = load_eval_rows(run_dir / "metrics.jsonl")
+    baseline = None
+    source = run_dir / "metrics.jsonl"
+    if source.exists():
+        rows = _load_rows(source)
+    elif (run_dir / "run.json").exists():
+        source = run_dir / "run.json"
+        baseline = _json_object(source)
+        rows = _baseline_rows(baseline)
+    else:
+        raise RunSummaryError(f"no metrics.jsonl or baseline run.json at {run_dir}")
+    evals = _eval_rows(rows, source)
     window = evals[-tail:]
+    issues: list[str] = []
     record: dict[str, Any] = {
         "run": run_dir.name,
         "path": str(run_dir),
+        "source": source.name,
         "evaluations": len(evals),
-        "epochs_evaluated": [r.get("epoch") for r in evals],
-        "terminal_window_epochs": [r.get("epoch") for r in window],
-        # A window shorter than requested is not an error, but it changes the
-        # estimator, so say so rather than let it pass unnoticed.
+        "epochs_evaluated": [r["epoch"] for r in evals],
+        "terminal_window_epochs": [r["epoch"] for r in window],
         "terminal_window_short": len(window) < tail,
+        "research_issues": issues,
     }
-
     for key in REPORTED_METRICS:
-        present = [r[key] for r in evals if isinstance(r.get(key), (int, float))]
-        in_window = [r[key] for r in window if isinstance(r.get(key), (int, float))]
-        record[f"terminal_{key}"] = _mean(in_window)
+        present = [r[key] for r in evals if _metric(r.get(key))]
+        in_window = [r[key] for r in window if _metric(r.get(key))]
+        # Missing secondary metrics must not silently change the averaging window.
+        record[f"terminal_{key}"] = (
+            statistics.mean(in_window) if len(in_window) == len(window) else None
+        )
         record[f"max_{key}"] = max(present) if present else None
-
-    ap_values = [r["val/AP"] for r in evals]
-    record["peak_epoch"] = evals[ap_values.index(max(ap_values))].get("epoch")
-    record["final_epoch"] = evals[-1].get("epoch")
-    # If AP peaked before the end, the schedule was not still improving at the
-    # point it stopped -- worth surfacing, since "still climbing" was asserted
-    # about runs whose AP had already turned over.
+        if any(key in r and not _metric(r[key]) for r in evals):
+            issues.append(f"invalid or unavailable {key} (including COCO -1 sentinels)")
+    ap = [r["val/AP"] for r in evals]
+    record["peak_epoch"] = evals[ap.index(max(ap))]["epoch"]
+    record["final_epoch"] = evals[-1]["epoch"]
     record["peaked_before_end"] = record["peak_epoch"] != record["final_epoch"]
-    window_ap = [r["val/AP"] for r in window if isinstance(r.get("val/AP"), (int, float))]
-    record["terminal_window_sd"] = statistics.stdev(window_ap) if len(window_ap) > 1 else None
-
-    losses = [
-        r["train/total_loss"] for r in evals if isinstance(r.get("train/total_loss"), (int, float))
-    ]
-    record["final_train_loss"] = losses[-1] if losses else None
-
-    status_path = run_dir / "status.json"
-    if status_path.exists():
-        try:
-            status = json.loads(status_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            status = {}
-        record["provenance"] = status.get("provenance")
-        record["completed"] = status.get("completed")
-    else:
-        record["provenance"] = None
-        record["completed"] = None
+    record["terminal_window_sd"] = (
+        statistics.stdev(r["val/AP"] for r in window) if len(window) > 1 else None
+    )
+    final_loss = rows[-1].get("train/total_loss")
+    record["final_train_loss"] = final_loss if _number(final_loss) else None
+    if "train/total_loss" in rows[-1] and not _number(final_loss):
+        issues.append("invalid final training loss")
+    status = (
+        _json_object(run_dir / "status.json")
+        if (run_dir / "status.json").exists()
+        else baseline or {}
+    )
+    record["completed"] = status.get("completed")
+    record["provenance"] = status.get("provenance")
+    if status.get("completed") is not True:
+        issues.append("completion not verified")
+    if len(window) < tail:
+        issues.append("terminal window shorter than requested")
+    manifest = None
+    try:
+        manifest = read_manifest(run_dir, record["provenance"] or {})
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        issues.append(f"launch manifest not verified: {exc}")
+    if manifest is not None:
+        artifacts = status.get("artifact_sha256", {})
+        if not isinstance(artifacts, dict):
+            artifacts = {}
+        if source.name not in artifacts or not any(name.endswith(".pth") for name in artifacts):
+            issues.append("metric log or checkpoint hashes missing")
+        for name, expected in artifacts.items():
+            try:
+                if Path(name).name != name or file_sha256(run_dir / name) != expected:
+                    issues.append(f"artifact checksum mismatch: {name}")
+            except OSError:
+                issues.append(f"artifact missing: {name}")
+        record["recipe_sha256"] = manifest["recipe_sha256"]
+        record["seed"] = manifest["seed"]
+        record["protocol"] = manifest["protocol"]
+        planned = manifest["config"].get("num_epochs")
+        if manifest["config"].get("diagnostic"):
+            issues.append("diagnostic run is not a research comparison")
+        if (
+            type(planned) is not int
+            or type(status.get("epochs_planned")) is not int
+            or type(status.get("epochs_completed")) is not int
+            or status.get("epochs_planned") != planned
+            or status.get("epochs_completed") != planned
+            or rows[-1]["epoch"] != planned
+        ):
+            issues.append("completed schedule does not match launch manifest")
+        if record["epochs_evaluated"] != manifest["eval_epochs"]:
+            issues.append("evaluation epochs do not match launch schedule")
+        if type(manifest["seed"]) is not int:
+            issues.append("seed missing or invalid")
+        if manifest["resume_from"] or manifest["start_epoch"] != 1:
+            issues.append("resumed run requires a separate continuity audit")
+        if any(
+            not manifest["data"][split].get("annotation_sha256")
+            for split in ("train", "validation")
+        ):
+            issues.append("training or validation annotations lack hashes")
+        initialization = manifest["recipe"]["initialization"]
+        if initialization["external_model"] or initialization["untracked_callable"]:
+            issues.append("model initialization not fully tracked")
+        if any(r.get("run_id") != manifest["run_id"] for r in rows):
+            issues.append("metric rows belong to a different or unknown run")
+        if any(r.get("eval_protocol") != manifest["protocol"] for r in evals):
+            issues.append("evaluation protocol differs from launch manifest")
+    record["research_eligible"] = not issues
     return record
 
 
 def aggregate(records: list[dict[str, Any]], metric: str = "val/AP") -> dict[str, Any]:
-    """Mean and sd of the terminal statistic across runs (i.e. across seeds)."""
-    values = [
-        r[f"terminal_{metric}"]
-        for r in records
-        if isinstance(r.get(f"terminal_{metric}"), (int, float))
-    ]
-    if not values:
+    """Across-seed spread within one recipe, never across experimental arms."""
+    if not records:
         return {"n": 0}
+    seeds = set()
+    identities = set()
+    values = []
+    for record in records:
+        if not record.get("research_eligible"):
+            raise RunSummaryError(
+                f"{record.get('run')}: research aggregate refused: "
+                + "; ".join(record.get("research_issues", ["unverified record"]))
+            )
+        value = record.get(f"terminal_{metric}")
+        if not _metric(value):
+            raise RunSummaryError(
+                f"{record['run']}: no complete valid terminal window for {metric}"
+            )
+        seed = record.get("seed")
+        if type(seed) is not int or seed in seeds:
+            raise RunSummaryError(f"duplicate or invalid seed: {seed}")
+        seeds.add(seed)
+        recipe = record.get("recipe_sha256")
+        if not recipe:
+            raise RunSummaryError("missing recipe identity")
+        identities.add((recipe, tuple(record["terminal_window_epochs"])))
+        values.append(value)
+    if len(identities) != 1:
+        raise RunSummaryError(
+            "mixed recipes, data, code, environments, protocols or terminal schedules"
+        )
     mean = statistics.mean(values)
     sd = statistics.stdev(values) if len(values) > 1 else None
     return {
         "n": len(values),
         "mean": mean,
         "sd": sd,
-        "cv_percent": (100 * sd / mean) if sd is not None and mean else None,
+        "cv_percent": 100 * sd / mean if sd is not None and mean else None,
         "values": values,
     }
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("run_dirs", nargs="+", type=Path, help="checkpoint directories")
-    parser.add_argument(
-        "--tail",
-        type=int,
-        default=DEFAULT_TAIL,
-        help=f"evaluations averaged for the terminal statistic (default {DEFAULT_TAIL})",
-    )
-    parser.add_argument("--json", type=Path, help="also write the records here")
-    parser.add_argument(
-        "--aggregate",
-        action="store_true",
-        help="report mean +/- sd of the terminal AP across the given runs",
-    )
-    return parser
-
-
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
-
-    records: list[dict[str, Any]] = []
-    for run_dir in args.run_dirs:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("run_dirs", nargs="+", type=Path)
+    parser.add_argument("--tail", type=int, default=DEFAULT_TAIL)
+    parser.add_argument("--json", type=Path)
+    parser.add_argument(
+        "--aggregate", action="store_true", help="aggregate one verified recipe across seeds"
+    )
+    args = parser.parse_args(argv)
+    records = []
+    skipped = False
+    for path in args.run_dirs:
         try:
-            records.append(summarise_run(run_dir, tail=args.tail))
+            records.append(summarise_run(path, args.tail))
         except RunSummaryError as exc:
-            print(f"  SKIP {run_dir}: {exc}")
-
+            print(f"SKIP {path}: {exc}")
+            skipped = True
     if not records:
         print("no runs could be summarised")
         return 1
-
-    header = (
-        f"{'run':<20}{'evals':>6}{'peak@':>7}{'term AP':>9}{'max AP':>8}"
-        f"{'AP50':>8}{'AP75':>8}{'AP_sm':>8}{'rice':>8}{'weed':>8}"
-    )
-    print(header)
-    for r in records:
-
-        def fmt(key: str, prefix: str = "terminal_") -> str:
-            value = r.get(f"{prefix}{key}")
-            return f"{value:.4f}" if isinstance(value, (int, float)) else "   -  "
-
-        peak = f"{r['peak_epoch']}{'*' if r['peaked_before_end'] else ''}"
+    print(f"{'run':<24} {'evals':>5} {'terminal AP':>12} {'max AP':>9}  research aggregate")
+    for record in records:
         print(
-            f"{r['run']:<20}{r['evaluations']:>6}{peak:>7}{fmt('val/AP'):>9}"
-            f"{fmt('val/AP', 'max_'):>8}{fmt('val/AP50'):>8}{fmt('val/AP75'):>8}"
-            f"{fmt('val/AP_small'):>8}{fmt('val/AP[rice_protect]'):>8}"
-            f"{fmt('val/AP[weed_target]'):>8}"
+            f"{record['run']:<24} {record['evaluations']:>5} "
+            f"{record['terminal_val/AP']:>12.4f} {record['max_val/AP']:>9.4f}  "
+            + ("eligible" if record["research_eligible"] else "; ".join(record["research_issues"]))
         )
-    print(
-        f"\nterminal = mean of the last {args.tail} evaluations; "
-        "max = the biased statistic, shown for contrast"
-    )
-    if any(r["peaked_before_end"] for r in records):
-        print("* AP peaked before the final evaluation — the run was not still improving")
-
-    if args.aggregate:
-        agg = aggregate(records)
-        if agg["n"] > 1:
-            print(
-                f"\nacross {agg['n']} runs: terminal AP {agg['mean']:.4f}"
-                f" +/- {agg['sd']:.4f}  (CV {agg['cv_percent']:.1f}%)"
-            )
-        else:
-            print(f"\nonly {agg['n']} run — no spread to report")
-
+    print(f"terminal = mean of last {args.tail} evaluations; epochs are correlated, not replicates")
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
-        args.json.write_text(json.dumps(records, indent=2, default=str), encoding="utf-8")
-        print(f"\nwrote {args.json}")
+        args.json.write_text(json.dumps(records, indent=2, allow_nan=False), encoding="utf-8")
+    if args.aggregate:
+        try:
+            if skipped:
+                raise RunSummaryError(
+                    "some requested runs could not be read; refusing a partial aggregate"
+                )
+            result = aggregate(records)
+        except RunSummaryError as exc:
+            print(f"AGGREGATE REFUSED: {exc}")
+            return 1
+        print(json.dumps(result, allow_nan=False))
     return 0
 
 

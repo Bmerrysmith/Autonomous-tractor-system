@@ -23,6 +23,7 @@ from agrinav.evaluation.run_summary import (
     main,
     summarise_run,
 )
+from agrinav.training.run_manifest import finish_run, start_run
 
 
 def _write_run(
@@ -32,17 +33,55 @@ def _write_run(
     name: str = "run",
     extra: dict[int, dict[str, float]] | None = None,
     status: dict | None = None,
+    seed: int | None = None,
+    config_extra: dict | None = None,
 ) -> Path:
     run_dir = tmp_path / name
     run_dir.mkdir(parents=True, exist_ok=True)
+    protocol = {"max_detections": 100, "use_soft_nms": False}
+    provenance = None
+    if seed is not None:
+
+        class Dataset(list):
+            pass
+
+        dataset = Dataset([1])
+        dataset.ann_file = tmp_path / "annotations.json"
+        dataset.ann_file.write_text('{"images": []}', encoding="utf-8")
+        provenance = start_run(
+            {
+                "num_epochs": max(ap_by_epoch),
+                "val_ap_interval": 2,
+                "seed": seed,
+                **(config_extra or {}),
+            },
+            run_dir,
+            trainer="fixture",
+            train_dataset=dataset,
+            val_dataset=dataset,
+            protocol=protocol,
+            device="cpu",
+        )
+        status = {
+            "completed": True,
+            "epochs_planned": max(ap_by_epoch),
+            "epochs_completed": max(ap_by_epoch),
+            "provenance": provenance,
+            **(status or {}),
+        }
     lines = []
     for epoch, ap in ap_by_epoch.items():
         row = {"epoch": epoch, "val/AP": ap, "train/total_loss": 5.0 - epoch * 0.1}
+        if provenance:
+            row.update(run_id=provenance["run_id"], eval_protocol=protocol)
         row.update((extra or {}).get(epoch, {}))
         lines.append(json.dumps(row))
     (run_dir / "metrics.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     if status is not None:
         (run_dir / "status.json").write_text(json.dumps(status), encoding="utf-8")
+    if provenance:
+        (run_dir / "fixture.pth").write_bytes(b"fixture checkpoint")
+        finish_run(run_dir, status, ["fixture.pth"])
     return run_dir
 
 
@@ -188,7 +227,7 @@ def test_absent_status_is_not_an_error(tmp_path: Path) -> None:
 
 def test_aggregate_reports_spread_across_runs(tmp_path: Path) -> None:
     runs = [
-        _write_run(tmp_path, {2: v, 4: v, 6: v}, name=f"r{i}")
+        _write_run(tmp_path, {2: v, 4: v, 6: v}, name=f"r{i}", seed=i)
         for i, v in enumerate((0.10, 0.20, 0.30))
     ]
     agg = aggregate([summarise_run(r) for r in runs])
@@ -199,7 +238,7 @@ def test_aggregate_reports_spread_across_runs(tmp_path: Path) -> None:
 
 
 def test_aggregate_of_one_run_has_no_sd(tmp_path: Path) -> None:
-    agg = aggregate([summarise_run(_write_run(tmp_path, {2: 0.1, 4: 0.1}))])
+    agg = aggregate([summarise_run(_write_run(tmp_path, {2: 0.1, 4: 0.1, 6: 0.1}, seed=42))])
     assert agg["n"] == 1 and agg["sd"] is None
 
 
@@ -207,7 +246,7 @@ def test_aggregate_of_one_run_has_no_sd(tmp_path: Path) -> None:
 
 
 def test_cli_writes_json_and_succeeds(tmp_path: Path) -> None:
-    run = _write_run(tmp_path, {2: 0.1, 4: 0.2, 6: 0.3})
+    run = _write_run(tmp_path, {2: 0.1, 4: 0.2, 6: 0.3}, seed=42)
     out = tmp_path / "nested" / "summary.json"
     assert main([str(run), "--json", str(out), "--aggregate"]) == 0
     records = json.loads(out.read_text(encoding="utf-8"))
@@ -221,3 +260,122 @@ def test_cli_skips_a_bad_run_but_reports_the_good_ones(tmp_path: Path) -> None:
 
 def test_cli_fails_when_nothing_can_be_summarised(tmp_path: Path) -> None:
     assert main([str(tmp_path / "absent")]) == 1
+
+
+@pytest.mark.parametrize("ap", [float("nan"), float("inf"), -1, 1.01, True, "0.1", None])
+def test_invalid_primary_metric_is_rejected(tmp_path, ap):
+    run = _write_run(tmp_path, {2: ap})
+    with pytest.raises(RunSummaryError, match="invalid val/AP"):
+        summarise_run(run)
+
+
+@pytest.mark.parametrize("row", [[], 42, None])
+def test_non_object_row_is_rejected(tmp_path, row):
+    path = tmp_path / "metrics.jsonl"
+    path.write_text(json.dumps(row), encoding="utf-8")
+    with pytest.raises(RunSummaryError, match="JSON object"):
+        load_eval_rows(path)
+
+
+@pytest.mark.parametrize("epochs", [[2, 2], [4, 2], [0, 2], [True, 2], [1.5, 2]])
+def test_invalid_epoch_sequence_is_rejected(tmp_path, epochs):
+    path = tmp_path / "metrics.jsonl"
+    path.write_text("\n".join(json.dumps({"epoch": e, "val/AP": 0.1}) for e in epochs))
+    with pytest.raises(RunSummaryError, match="epochs must be"):
+        load_eval_rows(path)
+
+
+def test_partial_secondary_window_does_not_change_estimator(tmp_path):
+    run = _write_run(tmp_path, {2: 0.1, 4: 0.1, 6: 0.1}, extra={2: {"val/AP_small": 0.4}})
+    assert summarise_run(run)["terminal_val/AP_small"] is None
+
+
+def test_coco_sentinel_is_unavailable_and_blocks_research(tmp_path):
+    run = _write_run(tmp_path, {2: 0.1, 4: 0.1, 6: 0.1}, seed=42, extra={6: {"val/AP_small": -1}})
+    record = summarise_run(run)
+    assert record["terminal_val/AP_small"] is None
+    with pytest.raises(RunSummaryError, match="sentinels"):
+        aggregate([record])
+
+
+@pytest.mark.parametrize("status", [{"completed": False}, {"epochs_completed": 4}])
+def test_incomplete_run_cannot_enter_aggregate(tmp_path, status):
+    run = _write_run(tmp_path, {2: 0.1, 4: 0.1, 6: 0.1}, seed=42, status=status)
+    with pytest.raises(RunSummaryError, match="aggregate refused"):
+        aggregate([summarise_run(run)])
+
+
+def test_duplicate_seed_is_not_replication(tmp_path):
+    runs = [
+        _write_run(tmp_path, {2: 0.1, 4: 0.1, 6: 0.1}, seed=42, name=name) for name in ("a", "b")
+    ]
+    with pytest.raises(RunSummaryError, match="duplicate"):
+        aggregate([summarise_run(run) for run in runs])
+
+
+def test_mixed_recipes_are_not_pooled(tmp_path):
+    a = _write_run(
+        tmp_path, {2: 0.1, 4: 0.1, 6: 0.1}, seed=42, name="a", config_extra={"img_size": 512}
+    )
+    b = _write_run(
+        tmp_path, {2: 0.1, 4: 0.1, 6: 0.1}, seed=43, name="b", config_extra={"img_size": 640}
+    )
+    with pytest.raises(RunSummaryError, match="mixed recipes"):
+        aggregate([summarise_run(a), summarise_run(b)])
+
+
+def test_missing_scheduled_evaluation_blocks_research(tmp_path):
+    run = _write_run(tmp_path, {2: 0.1, 6: 0.1, 8: 0.1}, seed=42)
+    assert "evaluation epochs do not match launch schedule" in summarise_run(run)["research_issues"]
+
+
+def test_manifest_tampering_blocks_research(tmp_path):
+    run = _write_run(tmp_path, {2: 0.1, 4: 0.1, 6: 0.1}, seed=42)
+    path = next(run.glob("manifest-*.json"))
+    manifest = json.loads(path.read_text())
+    manifest["seed"] = 99
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(RunSummaryError, match="checksum"):
+        aggregate([summarise_run(run)])
+
+
+def test_legacy_baseline_run_json_is_readable_but_not_verified(tmp_path):
+    (tmp_path / "run.json").write_text(
+        json.dumps(
+            {
+                "config": {"num_epochs": 6},
+                "epochs": [{"epoch": e, "val_ap": e / 10, "train_loss": 1.0} for e in (2, 4, 6)],
+            }
+        )
+    )
+    record = summarise_run(tmp_path)
+    assert record["terminal_val/AP"] == pytest.approx(0.4)
+    assert record["terminal_val/AP_small"] is None
+    assert not record["research_eligible"]
+
+
+def test_cli_refuses_partial_aggregate(tmp_path):
+    run = _write_run(tmp_path, {2: 0.1, 4: 0.1, 6: 0.1}, seed=42)
+    assert main([str(run), str(tmp_path / "absent"), "--aggregate"]) == 1
+
+
+def test_final_loss_uses_last_training_row(tmp_path):
+    run = _write_run(tmp_path, {2: 0.1})
+    with (run / "metrics.jsonl").open("a") as handle:
+        handle.write(json.dumps({"epoch": 3, "train/total_loss": 0.25}) + "\n")
+    assert summarise_run(run)["final_train_loss"] == 0.25
+
+
+def test_modified_checkpoint_cannot_enter_aggregate(tmp_path):
+    run = _write_run(tmp_path, {2: 0.1, 4: 0.1, 6: 0.1}, seed=42)
+    (run / "fixture.pth").write_bytes(b"different weights")
+    with pytest.raises(RunSummaryError, match="artifact checksum"):
+        aggregate([summarise_run(run)])
+
+
+def test_overfit_diagnostic_cannot_be_pooled_as_research(tmp_path):
+    run = _write_run(
+        tmp_path, {2: 0.1, 4: 0.1, 6: 0.1}, seed=42, config_extra={"diagnostic": "overfit"}
+    )
+    with pytest.raises(RunSummaryError, match="diagnostic run"):
+        aggregate([summarise_run(run)])

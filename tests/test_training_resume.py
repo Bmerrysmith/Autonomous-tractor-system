@@ -89,7 +89,10 @@ def test_resume_restores_online_weights_not_the_ema_copy(tmp_path):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
     warmup = wd.WarmupMultiStepLR(optimizer, warmup_iters=5, warmup_factor=0.001)
 
-    wd._restore_training_state(
+    # A crash can leave a partial status pointer; selection metadata must be
+    # restored from the same checkpoint as the weights.
+    (ckpt_dir / "status.json").write_text('{"completed": false}', encoding="utf-8")
+    restored = wd._restore_training_state(
         str(ckpt_dir / "weeddet_last.pth"),
         model=model,
         ema=ema,
@@ -105,6 +108,7 @@ def test_resume_restores_online_weights_not_the_ema_copy(tmp_path):
 
     assert torch.equal(model.state_dict()[key], saved["raw_state_dict"][key])
     assert torch.equal(ema.ema.state_dict()[key], saved["state_dict"][key])
+    assert restored[-1] == saved["best_epoch"] > 0
 
 
 # --------------------------------------------------------------------------- #

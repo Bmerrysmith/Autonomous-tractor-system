@@ -729,13 +729,15 @@ class eFPN(nn.Module):
 
 class LargeSeparableConv(nn.Module):
     """Decomposes k×k conv into k×1 then 1×k. Default k=7 (from paper ablation)."""
-    def __init__(self, ch, k=7):
+    def __init__(self, ch, k=7, norm='batch'):
         super().__init__()
+        if norm not in ('batch', 'group'):
+            raise ValueError(f'head_norm={norm!r} must be batch or group')
         self.seq = nn.Sequential(
             nn.Conv2d(ch, ch, (k, 1), padding=(k//2, 0), groups=ch, bias=False),
             nn.Conv2d(ch, ch, (1, k), padding=(0, k//2), groups=ch, bias=False),
             nn.Conv2d(ch, ch, 1, bias=False),
-            nn.BatchNorm2d(ch),
+            nn.BatchNorm2d(ch) if norm == 'batch' else nn.GroupNorm(32, ch),
             nn.ReLU(inplace=True),
         )
 
@@ -745,13 +747,14 @@ class LargeSeparableConv(nn.Module):
 
 class ERetinaHead(nn.Module):
     """Efficient Retina Head: 1 conv (64ch) + LSC instead of 4 convs (256ch)."""
-    def __init__(self, in_ch=256, num_classes=1, num_anchors=9, lsc_k=7):
+    def __init__(self, in_ch=256, num_classes=1, num_anchors=9, lsc_k=7,
+                 head_norm='batch'):
         super().__init__()
         mid = 64
         self.shared = nn.Sequential(
             nn.Conv2d(in_ch, mid, 3, padding=1),
             nn.ReLU(inplace=True),
-            LargeSeparableConv(mid, lsc_k),
+            LargeSeparableConv(mid, lsc_k, norm=head_norm),
         )
         self.cls_head = nn.Conv2d(mid, num_classes * num_anchors, 3, padding=1)
         self.reg_head = nn.Conv2d(mid, 4 * num_anchors, 3, padding=1)
@@ -949,9 +952,34 @@ class HardTargetFocalLikeLoss(nn.Module):
 VariFocalLoss = HardTargetFocalLikeLoss
 
 
+class ReferenceVarifocalLoss(nn.Module):
+    """IoU-weighted VarifocalNet objective, summed before positive-count normalization.
+
+    Positive weight is q, without the legacy |q-p| modulation. See the authors'
+    implementation: github.com/hyz-xmaster/VarifocalNet, varifocal_loss.py.
+    Targets are detached predicted IoUs when cls_target_mode='pred_iou'.
+    """
+    def __init__(self, alpha=0.75, gamma=2.0):
+        super().__init__()
+        self.alpha, self.gamma = alpha, gamma
+
+    def forward(self, pred, target, return_split=False):
+        target = target.to(dtype=pred.dtype)
+        pos = target > 0
+        weight = torch.where(pos, target,
+                             self.alpha * (pred.sigmoid() - target).abs().pow(self.gamma))
+        weighted = F.binary_cross_entropy_with_logits(pred, target, reduction='none') * weight
+        total = weighted.sum()
+        if not return_split:
+            return total
+        pos_sum = weighted[pos].sum().detach()
+        return total, pos_sum, total.detach() - pos_sum
+
+
 class WeedDetLoss(nn.Module):
-    """Combined loss: SmoothL1 + CIoU (regression) + VariFocal (classification)."""
+    """SmoothL1 + CIoU regression and an explicitly selected classification loss."""
     CLS_TARGET_MODES = ("hard", "anchor_iou", "pred_iou")
+    CLS_LOSS_MODES = ('legacy', 'varifocal')
     #: How ATSS builds its candidate pool. See `_assign_atss` for the measured
     #: comparison; `cells_best_shape` is the default and `legacy` reproduces the
     #: pre-2026-08-28 behaviour for ablation.
@@ -961,7 +989,7 @@ class WeedDetLoss(nn.Module):
     def __init__(self, num_classes=1, iou_threshold=0.5, neg_iou_threshold=0.4,
                  use_atss=True, atss_topk=9, vfl_use_pred_iou=False,
                  cls_target_mode=None, atss_candidate_mode="cells_best_shape",
-                 num_shapes_per_location=12):
+                 num_shapes_per_location=12, cls_loss_mode='legacy'):
         super().__init__()
         # What a POSITIVE anchor is trained to predict. This decides whether the
         # classification score carries localisation quality, which decides
@@ -1021,7 +1049,11 @@ class WeedDetLoss(nn.Module):
         self.atss_candidate_mode     = atss_candidate_mode
         self.num_shapes_per_location = num_shapes_per_location
         self.ciou_loss         = CIoULoss()
-        self.varifocal         = VariFocalLoss()
+        if cls_loss_mode not in self.CLS_LOSS_MODES:
+            raise ValueError(f'cls_loss_mode={cls_loss_mode!r} must be legacy or varifocal')
+        self.cls_loss_mode = cls_loss_mode
+        self.varifocal = (HardTargetFocalLikeLoss() if cls_loss_mode == 'legacy'
+                          else ReferenceVarifocalLoss())
 
     def encode(self, anchors, gt_boxes):
         aw = anchors[:, 2] - anchors[:, 0]
@@ -1303,7 +1335,8 @@ class WeedDet(nn.Module):
 
     def __init__(self, num_classes=1, anchor_base_scale=3, lsc_k=7, use_atss=True,
                  vfl_use_pred_iou=False, cls_target_mode=None,
-                 atss_candidate_mode="cells_best_shape"):
+                 atss_candidate_mode="cells_best_shape", cls_loss_mode='legacy',
+                 head_norm='batch'):
         super().__init__()
         self.num_classes = num_classes
         self.backbone    = DetResNet50()
@@ -1317,12 +1350,13 @@ class WeedDet(nn.Module):
         # The head must emit one prediction per anchor shape per location, so it
         # is sized from the generator rather than from a repeated literal.
         self.head        = ERetinaHead(256, num_classes,
-                                       self.anchor_gen.num_shapes, lsc_k)
+                                       self.anchor_gen.num_shapes, lsc_k, head_norm=head_norm)
         self.criterion   = WeedDetLoss(num_classes=num_classes, use_atss=use_atss,
                                        vfl_use_pred_iou=vfl_use_pred_iou,
                                        cls_target_mode=cls_target_mode,
                                        atss_candidate_mode=atss_candidate_mode,
-                                       num_shapes_per_location=self.anchor_gen.num_shapes)
+                                       num_shapes_per_location=self.anchor_gen.num_shapes,
+                                       cls_loss_mode=cls_loss_mode)
 
     def forward(self, images, targets=None):
         if isinstance(images, (list, tuple)):
@@ -1964,10 +1998,11 @@ def _restore_training_state(ckpt_path, *, model, ema, optimizer, lr_scheduler, w
     best_value = ckpt.get('best_metric_value')
     best_value = float(best_value) if best_value is not None else None
 
-    # best_epoch is not in the checkpoint payload; a previous status.json has it.
-    best_epoch = 0
+    # Prefer the checkpoint's own selection metadata. The mutable status pointer
+    # may describe a later epoch, or an interrupted attempt with no best yet.
+    best_epoch = int(ckpt.get('best_epoch', 0) or 0)
     status_path = os.path.join(ckpt_dir, 'status.json')
-    if os.path.isfile(status_path):
+    if not best_epoch and os.path.isfile(status_path):
         try:
             with open(status_path, encoding='utf-8') as handle:
                 best_epoch = int(json.load(handle).get('best_epoch', 0) or 0)
@@ -2020,59 +2055,6 @@ def evaluate_val_loss(model, loader, device):
     return {k: v / batches for k, v in totals.items()}
 
 
-def _run_provenance(config):
-    """Code and environment identity for this run (CLAUDE.md §24).
-
-    Written because the 2026-09-03 ablation produced ten runs that cannot say
-    which code made them: `status.json` recorded no commit, no config hash and
-    no seed, and the runs executed against an uncommitted working tree. A metric
-    without this cannot be reproduced or fairly compared to a later one.
-
-    Every field degrades to None rather than raising. Recording provenance must
-    never be the thing that kills a training run that otherwise succeeded.
-    """
-    # Imported here rather than at module scope: this runs once per run, and the
-    # module is imported by CPU-only tooling that has no use for them.
-    import datetime
-    import hashlib
-    import platform
-    import subprocess
-
-    repo_dir = os.path.dirname(os.path.abspath(__file__))
-
-    def _git(*args):
-        try:
-            done = subprocess.run(
-                ['git', *args], cwd=repo_dir, capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return done.stdout.strip() if done.returncode == 0 else None
-
-    porcelain = _git('status', '--porcelain')
-    config_json = json.dumps(config, sort_keys=True, default=str)
-
-    return {
-        'git_commit': _git('rev-parse', 'HEAD'),
-        'git_branch': _git('rev-parse', '--abbrev-ref', 'HEAD'),
-        # None means "could not determine", which is not the same as clean.
-        'git_dirty': None if porcelain is None else bool(porcelain),
-        'config_sha256': hashlib.sha256(config_json.encode('utf-8')).hexdigest(),
-        'seed': config.get('seed'),
-        'deterministic': config.get('deterministic', False),
-        'img_size': config.get('img_size'),
-        'batch_size': config.get('batch_size'),
-        'num_epochs': config.get('num_epochs'),
-        'anchor_base_scale': config.get('anchor_base_scale'),
-        'use_atss': config.get('use_atss'),
-        'python_version': platform.python_version(),
-        'torch_version': torch.__version__,
-        'cuda_version': torch.version.cuda,
-        'device_name': (
-            torch.cuda.get_device_name(0) if torch.cuda.is_available() else None),
-        'recorded_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }
-
-
 def train_with_progress(config):
     """Training loop with tqdm progress bars — preferred for Colab/Kaggle."""
     device = torch.device(
@@ -2089,6 +2071,9 @@ def train_with_progress(config):
         lsc_k=config.get('lsc_k', 7),
         use_atss=config.get('use_atss', True),
         cls_target_mode=config.get('cls_target_mode', 'hard'),
+        cls_loss_mode=config.get('cls_loss_mode', 'legacy'),
+        head_norm=config.get('head_norm', 'batch'),
+        atss_candidate_mode=config.get('atss_candidate_mode', 'cells_best_shape'),
     ).to(device)
     print(f"cls target mode: {model.criterion.cls_target_mode}")
 
@@ -2368,6 +2353,21 @@ def train_with_progress(config):
                     "point --checkpoint-dir at a fresh directory to start over.")
             completed_epochs = start_epoch - 1
 
+    from agrinav.training.run_manifest import atomic_json, finish_run, start_run
+    from agrinav.inference.postprocess import DEFAULT_PRE_NMS_TOPK
+    eval_protocol = {
+        'img_size': config.get('img_size', 512),
+        'score_threshold': config.get('val_score_threshold', DEFAULT_SCORE_THRESHOLD),
+        'nms_iou': config.get('val_nms_iou', DEFAULT_NMS_IOU),
+        'max_detections': config.get('val_max_detections', DEFAULT_MAX_DETECTIONS),
+        'use_soft_nms': config.get('val_use_soft_nms', True),
+        'pre_nms_topk': config.get('val_pre_nms_topk', DEFAULT_PRE_NMS_TOPK),
+    }
+    provenance = start_run(
+        config, ckpt_dir, trainer='weeddet', train_dataset=train_ds,
+        val_dataset=val_ds, protocol=eval_protocol, device=str(device),
+        resume_from=resume_from, start_epoch=start_epoch)
+
     epoch_range = range(start_epoch, num_epochs + 1)
     epoch_bar = (tqdm(epoch_range, desc='Epochs', mininterval=bar_interval)
                  if show_bars else epoch_range)
@@ -2540,8 +2540,7 @@ def train_with_progress(config):
             scored = ema.ema if ema is not None else model
             ap_result, _dets, ap_protocol = evaluate_split(
                 scored, val_ds, val_ap_ann_file, device=str(device),
-                img_size=config.get('img_size', 512),
-                batch_size=val_batch_size)
+                batch_size=val_batch_size, **eval_protocol)
             val_ap = {
                 'val/AP': ap_result.ap, 'val/AP50': ap_result.ap50,
                 'val/AP75': ap_result.ap75, 'val/AP_small': ap_result.ap_small,
@@ -2562,6 +2561,8 @@ def train_with_progress(config):
             epoch_metric = avg_loss
 
         row = {'epoch': epoch, 'num_epochs': num_epochs,
+               'run_id': provenance['run_id'],
+               'eval_protocol': eval_protocol if 'val/AP' in val_metrics else None,
                'train/total_loss': avg_loss, 'n_batches': n_batches,
                'skipped_batches': skipped_batches,
                'clipped_steps': clipped_steps, 'amp_skipped_steps': amp_skipped_steps,
@@ -2600,9 +2601,11 @@ def train_with_progress(config):
                     'loss': loss_value,
                     'best_metric_name': select_metric,
                     'best_metric_value': best_loss,
+                    'best_epoch': best_epoch,
                     'class_names': list(config.get('class_names', [])),
                     'num_classes': config.get('num_classes'),
                     'config': saved_config,
+                    'provenance': provenance,
                     'ema_state': (ema.state_dict()
                                   if ema is not None and hasattr(ema, 'state_dict')
                                   else None),
@@ -2626,6 +2629,10 @@ def train_with_progress(config):
             _log(f"  Checkpoint saved  -> {path}")
 
         completed_epochs = epoch
+        atomic_json(os.path.join(ckpt_dir, 'status.json'), {
+            'completed': False, 'epochs_planned': num_epochs,
+            'epochs_completed': completed_epochs, 'best_epoch': best_epoch,
+            'provenance': provenance})
 
     status = {
         'completed': completed_epochs == num_epochs,
@@ -2639,11 +2646,10 @@ def train_with_progress(config):
         'amp_skipped_steps': amp_skipped_steps,
         'global_step': global_step,
         'checkpoint_dir': os.path.abspath(ckpt_dir),
-        'provenance': _run_provenance(config),
+        'provenance': provenance,
     }
     status_path = os.path.join(ckpt_dir, 'status.json')
-    with open(status_path, 'w', encoding='utf-8') as handle:
-        json.dump(status, handle, indent=2, sort_keys=True)
+    finish_run(ckpt_dir, status, ['weeddet_last.pth', 'weeddet_best.pth'])
     _log(f"\nTraining complete. best_epoch={best_epoch} "
          f"({select_metric}={best_loss:.4f}) -> {status_path}")
     return model
